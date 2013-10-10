@@ -2838,6 +2838,51 @@ int OSDMonitor::prepare_command_pool_set(map<string,cmd_vartype> &cmdmap,
       return -EINVAL;
     }
     ss << " pool " << pool << " flag hashpspool";
+  } else if (var == "hit_set_type") {
+    HitSet::impl_type_t t;
+    if (val == "none")
+      t = HitSet::TYPE_NONE;
+    else if (val == "bloom")
+      t = HitSet::TYPE_BLOOM;
+    else if (val == "explicit_hash")
+      t = HitSet::TYPE_EXPLICIT_HASH;
+    else if (val == "explicit_object")
+      t = HitSet::TYPE_EXPLICIT_OBJECT;
+    else {
+      ss << "unrecognized hit_set type '" << val << "'";
+      return -EINVAL;
+    }
+    p.hit_set_params.reset_to_type(t);
+    ss << "set hit_set_type to " << val;
+  } else if (var == "hit_set_period") {
+    if (interr.length()) {
+      ss << "error parsing integer value '" << val << "': " << interr;
+      return -EINVAL;
+    }
+    p.hit_set_period = n;
+    ss << "set hit_set_period to " << n;
+  } else if (var == "hit_set_count") {
+    if (interr.length()) {
+      ss << "error parsing integer value '" << val << "': " << interr;
+      return -EINVAL;
+    }
+    p.hit_set_count = n;
+    ss << "set hit_set_count to " << n;
+  } else if (var == "hit_set_fpp") {
+    if (floaterr.length()) {
+      ss << "error parsing floating point value '" << val << "': " << floaterr;
+      return -EINVAL;
+    }
+    if (p.hit_set_params.get_type() != HitSet::TYPE_BLOOM) {
+      ss << "hit set is not of type Bloom; invalid to set a false positive rate!";
+      return -EINVAL;
+    }
+    BloomHitSet::Params *new_bloomp = new BloomHitSet::Params(
+	*static_cast<BloomHitSet::Params*>(p.hit_set_params.params.get()));
+    new_bloomp->false_positive = f;
+    HitSet::Params new_p(HitSet::TYPE_BLOOM, new_bloomp);
+    p.hit_set_params = new_p;
+    ss << "set hit_set_fpp to " << new_bloomp->false_positive;
   } else {
     ss << "unrecognized variable '" << var << "'";
     return -EINVAL;
