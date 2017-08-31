@@ -38,7 +38,7 @@ void add_log(librados::ObjectWriteOperation *op, const string& client_id, const 
   bufferlist bl;
   ::encode(state, bl);
 
-  utime_t ts = ceph_clock_now(g_ceph_context);
+  utime_t ts = ceph_clock_now();
 
   cls_statelog_add(*op, client_id, op_id, obj, ts, state, bl);
 }
@@ -113,7 +113,7 @@ TEST(cls_rgw, test_statelog_basic)
   int id = 0;
   string client_id[] = { "client-1", "client-2" };
 
-  int num_ops = 10;
+  const int num_ops = 10;
   string op_ids[num_ops];
 
   librados::ObjectWriteOperation *op = new_op();

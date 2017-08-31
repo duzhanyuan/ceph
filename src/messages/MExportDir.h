@@ -27,16 +27,16 @@ class MExportDir : public Message {
   bufferlist client_map;
 
   MExportDir() : Message(MSG_MDS_EXPORTDIR) {}
-  MExportDir(dirfrag_t df) : 
-    Message(MSG_MDS_EXPORTDIR),
-    dirfrag(df) {
+  MExportDir(dirfrag_t df, uint64_t tid) :
+    Message(MSG_MDS_EXPORTDIR), dirfrag(df) {
+    set_tid(tid);
   }
 private:
-  ~MExportDir() {}
+  ~MExportDir() override {}
 
 public:
-  const char *get_type_name() const { return "Ex"; }
-  void print(ostream& o) const {
+  const char *get_type_name() const override { return "Ex"; }
+  void print(ostream& o) const override {
     o << "export(" << dirfrag << ")";
   }
 
@@ -44,13 +44,13 @@ public:
     bounds.push_back(df); 
   }
 
-  void encode_payload(uint64_t features) {
+  void encode_payload(uint64_t features) override {
     ::encode(dirfrag, payload);
     ::encode(bounds, payload);
     ::encode(export_data, payload);
     ::encode(client_map, payload);
   }
-  void decode_payload() {
+  void decode_payload() override {
     bufferlist::iterator p = payload.begin();
     ::decode(dirfrag, p);
     ::decode(bounds, p);

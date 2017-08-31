@@ -114,15 +114,15 @@ void escape_xml_attr(const char *buf, char *out)
 
 #define DBL_QUOTE_JESCAPE "\\\""
 #define BACKSLASH_JESCAPE "\\\\"
-#define SLASH_JESCAPE "\\/"
 #define TAB_JESCAPE "\\t"
 #define NEWLINE_JESCAPE "\\n"
 
-int escape_json_attr_len(const char *buf)
+int escape_json_attr_len(const char *buf, int src_len)
 {
 	const char *b;
 	int ret = 0;
-	for (b = buf; *b; ++b) {
+	int i;
+	for (i = 0, b = buf; i < src_len; ++i, ++b) {
 		unsigned char c = *b;
 		switch (c) {
 		case '"':
@@ -130,9 +130,6 @@ int escape_json_attr_len(const char *buf)
 			break;
 		case '\\':
 			ret += SSTRL(BACKSLASH_JESCAPE);
-			break;
-		case '/':
-			ret += SSTRL(SLASH_JESCAPE);
 			break;
 		case '\t':
 			ret += SSTRL(TAB_JESCAPE);
@@ -155,30 +152,31 @@ int escape_json_attr_len(const char *buf)
 	return ret;
 }
 
-void escape_json_attr(const char *buf, char *out)
+void escape_json_attr(const char *buf, int src_len, char *out)
 {
 	char *o = out;
 	const char *b;
-	for (b = buf; *b; ++b) {
+	int i;
+	for (i = 0, b = buf; i < src_len; ++i, ++b) {
 		unsigned char c = *b;
 		switch (c) {
 		case '"':
+			// cppcheck-suppress invalidFunctionArg
 			memcpy(o, DBL_QUOTE_JESCAPE, SSTRL(DBL_QUOTE_JESCAPE));
 			o += SSTRL(DBL_QUOTE_JESCAPE);
 			break;
 		case '\\':
+			// cppcheck-suppress invalidFunctionArg
 			memcpy(o, BACKSLASH_JESCAPE, SSTRL(BACKSLASH_JESCAPE));
 			o += SSTRL(BACKSLASH_JESCAPE);
 			break;
-		case '/':
-			memcpy(o, SLASH_JESCAPE, SSTRL(SLASH_JESCAPE));
-			o += SSTRL(SLASH_JESCAPE);
-			break;
 		case '\t':
+			// cppcheck-suppress invalidFunctionArg
 			memcpy(o, TAB_JESCAPE, SSTRL(TAB_JESCAPE));
 			o += SSTRL(TAB_JESCAPE);
 			break;
 		case '\n':
+			// cppcheck-suppress invalidFunctionArg
 			memcpy(o, NEWLINE_JESCAPE, SSTRL(NEWLINE_JESCAPE));
 			o += SSTRL(NEWLINE_JESCAPE);
 			break;
@@ -197,3 +195,4 @@ void escape_json_attr(const char *buf, char *out)
 	// null terminator
 	*o = '\0';
 }
+

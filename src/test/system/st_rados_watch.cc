@@ -28,6 +28,7 @@ StRadosWatch::StRadosWatch(int argc, const char **argv,
 			   CrossProcessSem *watch_sem,
 			   CrossProcessSem *notify_sem,
 			   int num_notifies,
+			   int watch_retcode,
 			   const std::string &pool_name,
 			   const std::string &obj_name)
   : SysTestRunnable(argc, argv),
@@ -35,6 +36,7 @@ StRadosWatch::StRadosWatch(int argc, const char **argv,
     m_watch_sem(watch_sem),
     m_notify_sem(notify_sem),
     m_num_notifies(num_notifies),
+    m_watch_retcode(watch_retcode),
     m_pool_name(pool_name),
     m_obj_name(obj_name)
 {
@@ -44,6 +46,10 @@ StRadosWatch::
 ~StRadosWatch()
 {
 }
+
+#pragma GCC diagnostic ignored "-Wpragmas"
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 
 int StRadosWatch::
 run()
@@ -65,9 +71,12 @@ run()
   RETURN1_IF_NONZERO(rados_connect(cl));
   RETURN1_IF_NONZERO(rados_ioctx_create(cl, m_pool_name.c_str(), &io_ctx));
   printf("%s: watching object %s\n", get_id_str(), m_obj_name.c_str());
-  RETURN1_IF_NONZERO(rados_watch(io_ctx, m_obj_name.c_str(), 0, &handle,
-				 reinterpret_cast<rados_watchcb_t>(notify_cb),
-				 reinterpret_cast<void*>(&num_notifies)));
+
+  RETURN1_IF_NOT_VAL(m_watch_retcode,
+    rados_watch(io_ctx, m_obj_name.c_str(), 0, &handle,
+		reinterpret_cast<rados_watchcb_t>(notify_cb),
+		reinterpret_cast<void*>(&num_notifies))
+    );
   if (m_watch_sem) {
     m_watch_sem->post();
   }
@@ -82,9 +91,13 @@ run()
     r = 1;
   }
 
-  rados_unwatch(io_ctx, m_obj_name.c_str(), handle);
+  if (m_watch_retcode == 0)
+    rados_unwatch(io_ctx, m_obj_name.c_str(), handle);
   rados_ioctx_destroy(io_ctx);
   rados_shutdown(cl);
 
   return r;
 }
+
+#pragma GCC diagnostic pop
+#pragma GCC diagnostic warning "-Wpragmas"

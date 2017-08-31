@@ -1,6 +1,9 @@
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// vim: ts=8 sw=2 smarttab
+
 #ifndef CEPH_RGW_LOG_H
 #define CEPH_RGW_LOG_H
-
+#include <boost/container/flat_map.hpp>
 #include "rgw_common.h"
 #include "include/utime.h"
 #include "common/Formatter.h"
@@ -9,13 +12,16 @@
 class RGWRados;
 
 struct rgw_log_entry {
-  string object_owner;
-  string bucket_owner;
+
+  using headers_map = boost::container::flat_map<std::string, std::string>;
+
+  rgw_user object_owner;
+  rgw_user bucket_owner;
   string bucket;
   utime_t time;
   string remote_addr;
   string user;
-  string obj;
+  rgw_obj_key obj;
   string op;
   string uri;
   string http_status;
@@ -27,16 +33,17 @@ struct rgw_log_entry {
   string user_agent;
   string referrer;
   string bucket_id;
+  headers_map x_headers;
 
   void encode(bufferlist &bl) const {
-    ENCODE_START(6, 5, bl);
-    ::encode(object_owner, bl);
-    ::encode(bucket_owner, bl);
+    ENCODE_START(9, 5, bl);
+    ::encode(object_owner.id, bl);
+    ::encode(bucket_owner.id, bl);
     ::encode(bucket, bl);
     ::encode(time, bl);
     ::encode(remote_addr, bl);
     ::encode(user, bl);
-    ::encode(obj, bl);
+    ::encode(obj.name, bl);
     ::encode(op, bl);
     ::encode(uri, bl);
     ::encode(http_status, bl);
@@ -48,18 +55,22 @@ struct rgw_log_entry {
     ::encode(referrer, bl);
     ::encode(bytes_received, bl);
     ::encode(bucket_id, bl);
+    ::encode(obj, bl);
+    ::encode(object_owner, bl);
+    ::encode(bucket_owner, bl);
+    ::encode(x_headers, bl);
     ENCODE_FINISH(bl);
   }
   void decode(bufferlist::iterator &p) {
-    DECODE_START_LEGACY_COMPAT_LEN(6, 5, 5, p);
-    ::decode(object_owner, p);
+    DECODE_START_LEGACY_COMPAT_LEN(8, 5, 5, p);
+    ::decode(object_owner.id, p);
     if (struct_v > 3)
-      ::decode(bucket_owner, p);
+      ::decode(bucket_owner.id, p);
     ::decode(bucket, p);
     ::decode(time, p);
     ::decode(remote_addr, p);
     ::decode(user, p);
-    ::decode(obj, p);
+    ::decode(obj.name, p);
     ::decode(op, p);
     ::decode(uri, p);
     ::decode(http_status, p);
@@ -84,38 +95,25 @@ struct rgw_log_entry {
       } else {
         ::decode(bucket_id, p);
       }
-    } else
+    } else {
       bucket_id = "";
+    }
+    if (struct_v >= 7) {
+      ::decode(obj, p);
+    }
+    if (struct_v >= 8) {
+      ::decode(object_owner, p);
+      ::decode(bucket_owner, p);
+    }
+    if (struct_v >= 9) {
+      ::decode(x_headers, p);
+    }
     DECODE_FINISH(p);
   }
   void dump(Formatter *f) const;
   static void generate_test_instances(list<rgw_log_entry*>& o);
 };
 WRITE_CLASS_ENCODER(rgw_log_entry)
-
-struct rgw_intent_log_entry {
-  rgw_obj obj;
-  utime_t op_time;
-  uint32_t intent;
-
-  void encode(bufferlist &bl) const {
-    ENCODE_START(2, 2, bl);
-    ::encode(obj, bl);
-    ::encode(op_time, bl);
-    ::encode(intent, bl);
-    ENCODE_FINISH(bl);
-  }
-  void decode(bufferlist::iterator &p) {
-    DECODE_START_LEGACY_COMPAT_LEN(2, 2, 2, p);
-    ::decode(obj, p);
-    ::decode(op_time, p);
-    ::decode(intent, p);
-    DECODE_FINISH(p);
-  }
-  void dump(Formatter *f) const;
-  static void generate_test_instances(list<rgw_intent_log_entry*>& o);
-};
-WRITE_CLASS_ENCODER(rgw_intent_log_entry)
 
 class OpsLogSocket : public OutputDataSocket {
   Formatter *formatter;
@@ -124,21 +122,23 @@ class OpsLogSocket : public OutputDataSocket {
   void formatter_to_bl(bufferlist& bl);
 
 protected:
-  void init_connection(bufferlist& bl);
+  void init_connection(bufferlist& bl) override;
 
 public:
   OpsLogSocket(CephContext *cct, uint64_t _backlog);
-  ~OpsLogSocket();
+  ~OpsLogSocket() override;
 
   void log(struct rgw_log_entry& entry);
 };
 
-int rgw_log_op(RGWRados *store, struct req_state *s, const string& op_name, OpsLogSocket *olog);
-int rgw_log_intent(RGWRados *store, rgw_obj& obj, RGWIntentEvent intent, const utime_t& timestamp, bool utc);
-int rgw_log_intent(RGWRados *store, struct req_state *s, rgw_obj& obj, RGWIntentEvent intent);
+class RGWREST;
+
+int rgw_log_op(RGWRados *store, RGWREST* const rest, struct req_state *s,
+	       const string& op_name, OpsLogSocket *olog);
 void rgw_log_usage_init(CephContext *cct, RGWRados *store);
 void rgw_log_usage_finalize();
-void rgw_format_ops_log_entry(struct rgw_log_entry& entry, Formatter *formatter);
+void rgw_format_ops_log_entry(struct rgw_log_entry& entry,
+			      Formatter *formatter);
 
-#endif
+#endif /* CEPH_RGW_LOG_H */
 

@@ -13,9 +13,9 @@ Device`.
 
 .. ditaa:: 
            /------------------\         /----------------\
-           |    Admin Node    |         |   ceph–client  |
+           |    Admin Node    |         |   ceph-client  |
            |                  +-------->+ cCCC           |
-           |    ceph–deploy   |         |      ceph      |
+           |    ceph-deploy   |         |      ceph      |
            \------------------/         \----------------/
 
 
@@ -43,6 +43,19 @@ Install Ceph
 
 	ceph-deploy admin ceph-client
 
+   The ``ceph-deploy`` utility copies the keyring to the ``/etc/ceph`` 
+   directory. Ensure that the keyring file has appropriate read permissions 
+   (e.g., ``sudo chmod +r /etc/ceph/ceph.client.admin.keyring``).
+
+Create a Block Device Pool
+==========================
+
+#. On the admin node, use the ``ceph`` tool to `create a pool`_
+   (we recommend the name 'rbd').
+
+#. On the admin node, use the ``rbd`` tool to initialize the pool for use by RBD::
+
+        rbd pool init <pool-name>
 
 Configure a Block Device
 ========================
@@ -51,13 +64,9 @@ Configure a Block Device
 
 	rbd create foo --size 4096 [-m {mon-IP}] [-k /path/to/ceph.client.admin.keyring]
 
-#. On the ``ceph-client`` node, load the ``rbd`` client module. ::
-
-	sudo modprobe rbd
-
 #. On the ``ceph-client`` node, map the image to a block device. :: 
 
-	sudo rbd map foo --pool rbd --name client.admin [-m {mon-IP}] [-k /path/to/ceph.client.admin.keyring]
+	sudo rbd map foo --name client.admin [-m {mon-IP}] [-k /path/to/ceph.client.admin.keyring]
 	
 #. Use the block device by creating a file system on the ``ceph-client`` 
    node. :: 
@@ -72,10 +81,15 @@ Configure a Block Device
 	sudo mount /dev/rbd/rbd/foo /mnt/ceph-block-device
 	cd /mnt/ceph-block-device
 
+#. Optionally configure the block device to be automatically mapped and mounted
+   at boot (and unmounted/unmapped at shutdown) - see the `rbdmap manpage`_.
+
 
 See `block devices`_ for additional details.
 
 .. _Storage Cluster Quick Start: ../quick-ceph-deploy
-.. _block devices: ../../rbd/rbd
-.. _FAQ: http://wiki.ceph.com/03FAQs/01General_FAQ#How_Can_I_Give_Ceph_a_Try.3F
+.. _create a pool: ../../rados/operations/pools/#create-a-pool
+.. _block devices: ../../rbd
+.. _FAQ: http://wiki.ceph.com/How_Can_I_Give_Ceph_a_Try
 .. _OS Recommendations: ../os-recommendations
+.. _rbdmap manpage: ../../man/8/rbdmap

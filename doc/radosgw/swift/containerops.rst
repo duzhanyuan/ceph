@@ -14,13 +14,13 @@ is deliberately made publicly accessible (i.e., allows anonymous requests).
    When you hear someone refer to a 'bucket' within the Swift API, the term 
    'bucket' may be construed as the equivalent of the term 'container.'
    
-One facet of object storage is that it does not support hierachical paths
+One facet of object storage is that it does not support hierarchical paths
 or directories. Instead, it supports one level consisting of one or more
 containers, where each container may have objects. The RADOS Gateway's
-Swift-compatible API supports the notion of 'psuedo-hierarchical containers,'
+Swift-compatible API supports the notion of 'pseudo-hierarchical containers,'
 which is a means of using object naming to emulate a container (or directory)
-hierachy without actually implementing one in the storage system. You may 
-name objects with pseudo-hiearchical names 
+hierarchy without actually implementing one in the storage system. You may 
+name objects with pseudo-hierarchical names 
 (e.g., photos/buildings/empire-state.jpg), but container names cannot
 contain a forward slash (``/``) character.
 
@@ -257,7 +257,7 @@ Delete a Container
 To delete a container, make a ``DELETE`` request with the API version, account,
 and the name of the container. The container must be empty. If you'd like to check 
 if the container is empty, execute a ``HEAD`` request against the container. Once 
-you've successfully removed the container, you'll be able to reuse the container name.
+you have successfully removed the container, you will be able to reuse the container name.
 
 Syntax
 ~~~~~~

@@ -15,11 +15,13 @@
 #ifndef OS_KEYVALUESTORE_H
 #define OS_KEYVALUESTORE_H
 
-#include "IndexManager.h"
-#include "SequencerPosition.h"
 #include <string>
 #include <vector>
-#include <tr1/memory>
+#include "include/memory.h"
+#include "kv/KeyValueDB.h"
+#include "common/hobject.h"
+
+class SequencerPosition;
 
 /**
  * Encapsulates the FileStore key value store
@@ -28,6 +30,7 @@
  */
 class ObjectMap {
 public:
+  CephContext* cct;
   /// Set keys and values from specified map
   virtual int set_keys(
     const ghobject_t &oid,              ///< [in] object containing map
@@ -54,10 +57,16 @@ public:
     const SequencerPosition *spos=0     ///< [in] sequencer position
     ) = 0;
 
-  /// Clear all map keys and values from oid
+  /// Clear all map keys and values in to_clear from oid
   virtual int rm_keys(
     const ghobject_t &oid,              ///< [in] object containing map
     const set<string> &to_clear,        ///< [in] Keys to clear
+    const SequencerPosition *spos=0     ///< [in] sequencer position
+    ) = 0;
+
+  /// Clear all omap keys and the header
+  virtual int clear_keys_header(
+    const ghobject_t &oid,              ///< [in] oid to clear
     const SequencerPosition *spos=0     ///< [in] sequencer position
     ) = 0;
 
@@ -98,7 +107,7 @@ public:
   /// Get all xattrs
   virtual int get_all_xattrs(
     const ghobject_t &oid,             ///< [in] object
-    set<string> *out       ///< [out] attrs and values
+    set<string> *out                   ///< [out] attrs and values
     ) = 0;
 
   /// set xattrs in to_set
@@ -116,8 +125,22 @@ public:
     ) = 0;
 
 
-  /// Clone keys efficiently from oid map to target map
+  /// Clone keys from oid map to target map
   virtual int clone(
+    const ghobject_t &oid,             ///< [in] object containing map
+    const ghobject_t &target,           ///< [in] target of clone
+    const SequencerPosition *spos=0     ///< [in] sequencer position
+    ) { return 0; }
+
+  /// Rename map because of name change
+  virtual int rename(
+    const ghobject_t &from,             ///< [in] object containing map
+    const ghobject_t &to,               ///< [in] new name
+    const SequencerPosition *spos=0     ///< [in] sequencer position
+    ) { return 0; }
+
+  /// For testing clone keys from oid map to target map using faster but more complex method
+  virtual int legacy_clone(
     const ghobject_t &oid,             ///< [in] object containing map
     const ghobject_t &target,           ///< [in] target of clone
     const SequencerPosition *spos=0     ///< [in] sequencer position
@@ -129,26 +152,18 @@ public:
     const SequencerPosition *spos=0   ///< [in] Sequencer
     ) { return 0; }
 
-  virtual bool check(std::ostream &out) { return true; }
+  virtual int check(std::ostream &out, bool repair = false) { return 0; }
 
-  class ObjectMapIteratorImpl {
-  public:
-    virtual int seek_to_first() = 0;
-    virtual int upper_bound(const string &after) = 0;
-    virtual int lower_bound(const string &to) = 0;
-    virtual bool valid() = 0;
-    virtual int next() = 0;
-    virtual string key() = 0;
-    virtual bufferlist value() = 0;
-    virtual int status() = 0;
-    virtual ~ObjectMapIteratorImpl() {}
-  };
-  typedef std::tr1::shared_ptr<ObjectMapIteratorImpl> ObjectMapIterator;
+  virtual void compact() {}
+
+  typedef KeyValueDB::GenericIteratorImpl ObjectMapIteratorImpl;
+  typedef ceph::shared_ptr<ObjectMapIteratorImpl> ObjectMapIterator;
   virtual ObjectMapIterator get_iterator(const ghobject_t &oid) {
     return ObjectMapIterator();
   }
 
 
+  ObjectMap(CephContext* cct) : cct(cct) {}
   virtual ~ObjectMap() {}
 };
 

@@ -3,12 +3,14 @@
 #ifndef CEPH_COMMON_PREFORKER_H
 #define CEPH_COMMON_PREFORKER_H
 
-#include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
-#include <errno.h>
 #include <unistd.h>
+#include <sstream>
+
+#include "include/assert.h"
 #include "common/safe_io.h"
+#include "common/errno.h"
 
 /**
  * pre-fork fork/daemonize helper class
@@ -30,22 +32,35 @@ public:
       forked(false)
   {}
 
-  void prefork() {
+  int prefork(std::string &err) {
     assert(!forked);
-    int r = socketpair(AF_UNIX, SOCK_STREAM, 0, fd);
+    int r = ::socketpair(AF_UNIX, SOCK_STREAM, 0, fd);
+    std::ostringstream oss;
     if (r < 0) {
-      cerr << "[" << getpid() << "]: unable to create socketpair: " << cpp_strerror(errno) << std::endl;
-      exit(errno);
+      oss << "[" << getpid() << "]: unable to create socketpair: " << cpp_strerror(errno);
+      err = oss.str();
+      return r;
     }
 
     forked = true;
 
     childpid = fork();
-    if (childpid == 0) {
+    if (childpid < 0) {
+      r = -errno;
+      oss << "[" << getpid() << "]: unable to fork: " << cpp_strerror(errno);
+      err = oss.str();
+      return r;
+    }
+    if (is_child()) {
       ::close(fd[0]);
     } else {
       ::close(fd[1]);
     }
+    return 0;
+  }
+
+  int get_signal_fd() const {
+    return forked ? fd[1] : 0;
   }
 
   bool is_child() {
@@ -56,10 +71,11 @@ public:
     return childpid != 0;
   }
 
-  int parent_wait() {
+  int parent_wait(std::string &err_msg) {
     assert(forked);
 
     int r = -1;
+    std::ostringstream oss;
     int err = safe_read_exact(fd[0], &r, sizeof(r));
     if (err == 0 && r == -1) {
       // daemonize
@@ -68,12 +84,25 @@ public:
       ::close(2);
       r = 0;
     } else if (err) {
-      cerr << "[" << getpid() << "]: " << cpp_strerror(-err) << std::endl;
+      oss << "[" << getpid() << "]: " << cpp_strerror(err);
     } else {
       // wait for child to exit
-      waitpid(childpid, NULL, 0);
+      int status;
+      err = waitpid(childpid, &status, 0);
+      if (err < 0) {
+        oss << "[" << getpid() << "]" << " waitpid error: " << cpp_strerror(err);
+      } else if (WIFSIGNALED(status)) {
+        oss << "[" << getpid() << "]" << " exited with a signal";
+      } else if (!WIFEXITED(status)) {
+        oss << "[" << getpid() << "]" << " did not exit normally";
+      } else {
+        err = WEXITSTATUS(status);
+        if (err != 0)
+         oss << "[" << getpid() << "]" << " returned exit_status " << cpp_strerror(err);
+      }
     }
-    return r;
+    err_msg = oss.str();
+    return err;
   }
 
   int signal_exit(int r) {
@@ -87,7 +116,8 @@ public:
     return r;
   }
   void exit(int r) {
-    signal_exit(r);
+    if (is_child())
+        signal_exit(r);
     ::exit(r);
   }
 

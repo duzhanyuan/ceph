@@ -26,13 +26,13 @@ class MExportDirPrep : public Message {
   list<dirfrag_t> bounds;
   list<bufferlist> traces;
 private:
-  set<__s32> bystanders;
+  set<mds_rank_t> bystanders;
   bool b_did_assim;
 
 public:
   dirfrag_t get_dirfrag() { return dirfrag; }
   list<dirfrag_t>& get_bounds() { return bounds; }
-  set<__s32> &get_bystanders() { return bystanders; }
+  set<mds_rank_t> &get_bystanders() { return bystanders; }
 
   bool did_assim() { return b_did_assim; }
   void mark_assim() { b_did_assim = true; }
@@ -40,16 +40,17 @@ public:
   MExportDirPrep() {
     b_did_assim = false;
   }
-  MExportDirPrep(dirfrag_t df) : 
+  MExportDirPrep(dirfrag_t df, uint64_t tid) :
     Message(MSG_MDS_EXPORTDIRPREP),
-    dirfrag(df),
-    b_did_assim(false) { }
+    dirfrag(df), b_did_assim(false) {
+    set_tid(tid);
+  }
 private:
-  ~MExportDirPrep() {}
+  ~MExportDirPrep() override {}
 
 public:
-  const char *get_type_name() const { return "ExP"; }
-  void print(ostream& o) const {
+  const char *get_type_name() const override { return "ExP"; }
+  void print(ostream& o) const override {
     o << "export_prep(" << dirfrag << ")";
   }
 
@@ -59,11 +60,11 @@ public:
   void add_trace(bufferlist& bl) {
     traces.push_back(bl);
   }
-  void add_bystander(int who) {
+  void add_bystander(mds_rank_t who) {
     bystanders.insert(who);
   }
 
-  void decode_payload() {
+  void decode_payload() override {
     bufferlist::iterator p = payload.begin();
     ::decode(dirfrag, p);
     ::decode(basedir, p);
@@ -72,7 +73,7 @@ public:
     ::decode(bystanders, p);
   }
 
-  void encode_payload(uint64_t features) {
+  void encode_payload(uint64_t features) override {
     ::encode(dirfrag, payload);
     ::encode(basedir, payload);
     ::encode(bounds, payload);

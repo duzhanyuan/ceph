@@ -89,6 +89,7 @@ struct rename_rollback {
   void dump(Formatter *f) const;
   static void generate_test_instances(list<rename_rollback*>& ls);
 };
+WRITE_CLASS_ENCODER(rename_rollback::drec)
 WRITE_CLASS_ENCODER(rename_rollback)
 
 
@@ -113,7 +114,7 @@ public:
   bufferlist rollback;
   string type;
   metareqid_t reqid;
-  __s32 master;
+  mds_rank_t master;
   __u8 op;  // prepare, commit, abort
   __u8 origop; // link | rename
 
@@ -125,7 +126,7 @@ public:
     master(mastermds),
     op(o), origop(oo) { }
   
-  void print(ostream& out) const {
+  void print(ostream& out) const override {
     if (type.length())
       out << type << " ";
     out << " " << (int)op;
@@ -136,12 +137,15 @@ public:
     out << commit;
   }
 
-  void encode(bufferlist& bl) const;
-  void decode(bufferlist::iterator& bl);
-  void dump(Formatter *f) const;
+  EMetaBlob *get_metablob() override { return &commit; }
+
+  void encode(bufferlist& bl, uint64_t features) const override;
+  void decode(bufferlist::iterator& bl) override;
+  void dump(Formatter *f) const override;
   static void generate_test_instances(list<ESlaveUpdate*>& ls);
 
-  void replay(MDS *mds);
+  void replay(MDSRank *mds) override;
 };
+WRITE_CLASS_ENCODER_FEATURES(ESlaveUpdate)
 
 #endif

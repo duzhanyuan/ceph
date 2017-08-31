@@ -18,29 +18,34 @@
 #include "MExportDir.h"
 
 class MExportDirAck : public Message {
+public:
   dirfrag_t dirfrag;
+  bufferlist imported_caps;
 
- public:
   dirfrag_t get_dirfrag() { return dirfrag; }
   
   MExportDirAck() : Message(MSG_MDS_EXPORTDIRACK) {}
-  MExportDirAck(dirfrag_t i) :
-    Message(MSG_MDS_EXPORTDIRACK), dirfrag(i) { }
+  MExportDirAck(dirfrag_t df, uint64_t tid) :
+    Message(MSG_MDS_EXPORTDIRACK), dirfrag(df) {
+    set_tid(tid);
+  }
 private:
-  ~MExportDirAck() {}
+  ~MExportDirAck() override {}
 
 public:
-  const char *get_type_name() const { return "ExAck"; }
-    void print(ostream& o) const {
+  const char *get_type_name() const override { return "ExAck"; }
+    void print(ostream& o) const override {
     o << "export_ack(" << dirfrag << ")";
   }
 
-  void decode_payload() {
+  void decode_payload() override {
     bufferlist::iterator p = payload.begin();
     ::decode(dirfrag, p);
+    ::decode(imported_caps, p);
   }
-  void encode_payload(uint64_t features) {
+  void encode_payload(uint64_t features) override {
     ::encode(dirfrag, payload);
+    ::encode(imported_caps, payload);
   }
 
 };

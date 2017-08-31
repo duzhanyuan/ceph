@@ -5,7 +5,7 @@ Peter Reiher
 7/30/12
 
 The original Cephx protocol authenticated the client to the authenticator and set up a session 
-key used to authenticate the client to the server he needs to talk to.  It did not, however, 
+key used to authenticate the client to the server it needs to talk to.  It did not, however,
 authenticate the ongoing messages between the client and server.  Based on the fact that they
 share a secret key, these ongoing session messages can be easily authenticated by using the
 key to sign the messages.  
@@ -32,11 +32,11 @@ that the sender had better be in agreement with the receiver on the session secu
 since otherwise messages will be uniformly dropped between them.
 
 The code is also prepared to handle encryption and decryption of session messages, which would
-add secrecy to the ingrity provided by the signatures.  No protocol currently implemented
+add secrecy to the integrity provided by the signatures.  No protocol currently implemented
 encrypts the ongoing session messages, though.
 
 For this functionality to work, several steps are required.  First, the sender and receiver must have 
-a succesful run of the cephx protocol to establish a shared key.  They must store that key somewhere
+a successful run of the cephx protocol to establish a shared key.  They must store that key somewhere
 that the pipe can get at later, to permit messages to be signed with it.  Sent messages must be
 signed, and received messages must have their signatures checked.
 
@@ -142,7 +142,8 @@ Adding Encryption to Sessions
 
 The existing code is partially, but not fully, set up to allow sessions to have their packets
 encrypted.  Part of adding encryption would be similar to adding a new authentication method.
-But one would also need to add calls to the encryption and decryption routines in ``write\_message()`` and ``read\_message()``.  These calls would probably go near where the current calls for
+But one would also need to add calls to the encryption and decryption routines in ``write\_message()`` 
+and ``read\_message()``.  These calls would probably go near where the current calls for
 authentication are made.  You should consider whether you want to replace the existing calls
 with something more general that does whatever the chosen form of session security requires,
 rather than explicitly saying ``sign`` or ``encrypt``.

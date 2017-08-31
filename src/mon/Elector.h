@@ -20,11 +20,9 @@
 using namespace std;
 
 #include "include/types.h"
-#include "msg/Message.h"
-
 #include "include/Context.h"
-
-#include "common/Timer.h"
+#include "mon/MonOpRequest.h"
+#include "mon/mon_types.h"
 
 class Monitor;
 
@@ -39,6 +37,26 @@ class Elector {
    * @{
    */
  private:
+   /**
+   * @defgroup Elector_h_internal_types Internal Types
+   * @{
+   */
+  /**
+   * This struct will hold the features from a given peer.
+   * Features may both be the cluster's (in the form of a uint64_t), or
+   * mon-specific features. Instead of keeping maps to hold them both, or
+   * a pair, which would be weird, a struct to keep them seems appropriate.
+   */
+  struct elector_info_t {
+    uint64_t cluster_features;
+    mon_feature_t mon_features;
+    map<string,string> metadata;
+  };
+
+  /**
+   * @}
+   */
+
   /**
    * The Monitor instance associated with this class.
    */
@@ -48,7 +66,7 @@ class Elector {
    * Event callback responsible for dealing with an expired election once a
    * timer runs out and fires up.
    */
-  Context *expire_event;
+  Context *expire_event = nullptr;
 
   /**
    * Resets the expire_event timer, by cancelling any existing one and
@@ -56,7 +74,7 @@ class Elector {
    *
    * @remarks This function assumes as a default firing value the duration of
    *	      the monitor's lease interval, and adds to it the value specified
-   *	      in @plus
+   *	      in @e plus
    *
    * @post expire_event is set
    *
@@ -113,7 +131,7 @@ class Elector {
    * If we are acked by everyone in the MonMap, we will declare
    * victory.  Also note each peer's feature set.
    */
-  map<int, uint64_t> acked_me;
+  map<int, elector_info_t> acked_me;
   /**
    * @}
    */
@@ -126,7 +144,7 @@ class Elector {
    */
   int	    leader_acked;
   /**
-   * Indicates when we have acked him
+   * Indicates when we have acked it
    */
   utime_t   ack_stamp;
   /**
@@ -146,35 +164,6 @@ class Elector {
    * @param e Epoch to which we will update our epoch
    */
   void bump_epoch(epoch_t e);
-
-  /**
-   * @defgroup Elector_h_callbacks Callbacks
-   * @{
-   */
-  /**
-   * This class is used as the callback when the expire_event timer fires up.
-   *
-   * If the expire_event is fired, then it means that we had an election going,
-   * either started by us or by some other participant, but it took too long,
-   * thus expiring.
-   *
-   * When the election expires, we will check if we were the ones who won, and
-   * if so we will declare victory. If that is not the case, then we assume
-   * that the one we defered to didn't declare victory quickly enough (in fact,
-   * as far as we know, we may even be dead); so, just propose ourselves as the
-   * Leader.
-   */
-  class C_ElectionExpire : public Context {
-    Elector *elector;
-  public:
-    C_ElectionExpire(Elector *e) : elector(e) { }
-    void finish(int r) {
-      elector->expire();
-    }
-  };
-  /**
-   * @}
-   */
 
   /**
    * Start new elections by proposing ourselves as the new Leader.
@@ -242,9 +231,9 @@ class Elector {
    * @post  We sent a message of type OP_VICTORY to each quorum member.
    */
   void victory();
-  
+
   /**
-   * Handle a message from some other node proposing himself to become him
+   * Handle a message from some other node proposing itself to become it
    * the Leader.
    *
    * If the message appears to be old (i.e., its epoch is lower than our epoch),
@@ -252,16 +241,16 @@ class Elector {
    *
    *  @li Ignore it because it's nothing more than an old proposal
    *  @li Start new elections if we verify that it was sent by a monitor from
-   *	  outside the quorum; given its old state, it's fair to assume he just
-   *	  started, so we should start new elections so he may rejoin
+   *	  outside the quorum; given its old state, it's fair to assume it just
+   *	  started, so we should start new elections so it may rejoin
    *
    * If we did not ignore the received message, then we know that this message
-   * was sent by some other node proposing himself to become the Leader. So, we
+   * was sent by some other node proposing itself to become the Leader. So, we
    * will take one of the following actions:
    *
-   *  @li Ignore him because we already acked another node with higher rank
-   *  @li Ignore him and start a new election because we outrank him
-   *  @li Defer to him because he outranks us and the node we previously
+   *  @li Ignore it because we already acked another node with higher rank
+   *  @li Ignore it and start a new election because we outrank it
+   *  @li Defer to it because it outranks us and the node we previously
    *	  acked, if any
    *
    *
@@ -269,7 +258,7 @@ class Elector {
    *
    * @param m A message sent by another participant in the quorum.
    */
-  void handle_propose(class MMonElection *m);
+  void handle_propose(MonOpRequestRef op);
   /**
    * Handle a message from some other participant Acking us as the Leader.
    *
@@ -292,7 +281,7 @@ class Elector {
    *
    * @param m A message with an operation type of OP_ACK
    */
-  void handle_ack(class MMonElection *m);
+  void handle_ack(MonOpRequestRef op);
   /**
    * Handle a message from some other participant declaring Victory.
    *
@@ -313,7 +302,32 @@ class Elector {
    *
    * @param m A message with an operation type of OP_VICTORY
    */
-  void handle_victory(class MMonElection *m);
+  void handle_victory(MonOpRequestRef op);
+  /**
+   * Send a nak to a peer who's out of date, containing information about why.
+   *
+   * If we get a message from a peer who can't support the required quorum
+   * features, we have to ignore them. This function will at least send
+   * them a message about *why* they're being ignored -- if they're new
+   * enough to support such a message.
+   *
+   * @param m A message from a monitor not supporting required features. We
+   * take ownership of the reference.
+   */
+  void nak_old_peer(MonOpRequestRef op);
+  /**
+   * Handle a message from some other participant declaring
+   * we cannot join the quorum.
+   *
+   * Apparently the quorum requires some feature that we do not implement. Shut
+   * down gracefully.
+   *
+   * @pre Election is on-going.
+   * @post We've shut down.
+   *
+   * @param m A message with an operation type of OP_NAK
+   */
+  void handle_nak(MonOpRequestRef op);
   
  public:
   /**
@@ -321,12 +335,11 @@ class Elector {
    *
    * @param m A Monitor instance
    */
-  Elector(Monitor *m) : mon(m),
-			       expire_event(0),
-			       epoch(0),
-			       participating(true),
-			       electing_me(false),
-			       leader_acked(-1) { }
+  explicit Elector(Monitor *m) : mon(m),
+			epoch(0),
+			participating(true),
+			electing_me(false),
+			leader_acked(-1) { }
 
   /**
    * Initiate the Elector class.
@@ -372,7 +385,7 @@ class Elector {
    *
    * @param m A received message
    */
-  void dispatch(Message *m);
+  void dispatch(MonOpRequestRef op);
 
   /**
    * Call an election.
@@ -402,6 +415,7 @@ class Elector {
    * @post  @p participating is true
    */
   void start_participating();
+
   /**
    * @}
    */

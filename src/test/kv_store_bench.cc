@@ -37,7 +37,8 @@ KvStoreBench::KvStoreBench()
   ops_in_flight(0),
   ops_in_flight_lock("KvStoreBench::ops_in_flight_lock"),
   rados_id("admin"),
-  pool_name("data")
+  pool_name("rbd"),
+  io_ctx_ready(false)
 {
   probs[25] = 'i';
   probs[50] = 'u';
@@ -47,9 +48,11 @@ KvStoreBench::KvStoreBench()
 
 KvStoreBench::~KvStoreBench()
 {
-  librados::ObjectWriteOperation owo;
-  owo.remove();
-  io_ctx.operate(client_name + ".done-setting", &owo);
+  if (io_ctx_ready) {
+    librados::ObjectWriteOperation owo;
+    owo.remove();
+    io_ctx.operate(client_name + ".done-setting", &owo);
+  }
   delete kvs;
 }
 
@@ -112,7 +115,9 @@ int KvStoreBench::setup(int argc, const char** argv) {
       } else if (strcmp(args[i], "--cache-size") == 0) {
 	cache_size = atoi(args[i+1]);
       } else if (strcmp(args[i], "--cache-refresh") == 0) {
-	cache_refresh = 100 / atoi(args[i+1]);
+	auto temp = atoi(args[i+1]);
+	assert (temp != 0);
+	cache_refresh = 100 / temp;
       } else if (strcmp(args[i], "-t") == 0) {
 	max_ops_in_flight = atoi(args[i+1]);
       } else if (strcmp(args[i], "--clients") == 0) {
@@ -187,13 +192,14 @@ int KvStoreBench::setup(int argc, const char** argv) {
     rados.shutdown();
     return r;
   }
+  io_ctx_ready = true;
 
   if (clear_first) {
-    librados::ObjectIterator it;
-    for (it = io_ctx.objects_begin(); it != io_ctx.objects_end(); ++it) {
+    librados::NObjectIterator it;
+    for (it = io_ctx.nobjects_begin(); it != io_ctx.nobjects_end(); ++it) {
       librados::ObjectWriteOperation rm;
       rm.remove();
-      io_ctx.operate(it->first, &rm);
+      io_ctx.operate(it->get_oid(), &rm);
     }
   }
 
@@ -322,7 +328,7 @@ void KvStoreBench::aio_callback_timed(int * err, void *arg) {
   //throughput
   args->kvsb->data.throughput_jf.open_object_section("throughput");
   args->kvsb->data.throughput_jf.dump_unsigned(string(1, args->op).c_str(),
-      ceph_clock_now(g_ceph_context));
+      ceph_clock_now());
   args->kvsb->data.throughput_jf.close_section();
 
   data_lock->Unlock();
@@ -420,9 +426,7 @@ int KvStoreBench::test_teuthology_aio(next_gen_t distr,
       break;
     }
 
-    if (cb_args) {
-      delete cb_args;
-    }
+    delete cb_args;
   }
 
   while(ops_in_flight > 0) {

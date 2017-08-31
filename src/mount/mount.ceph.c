@@ -3,9 +3,8 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <sys/mount.h>
-#include <sys/types.h>
-#include <sys/wait.h>
 
+#include "common/module.h"
 #include "common/secret.h"
 #include "include/addr_parsing.h"
 
@@ -17,6 +16,7 @@
 #define MAX_SECRET_OPTION_LEN (MAX_SECRET_LEN + 7)
 
 int verboseflag = 0;
+int skip_mtab_flag = 0;
 static const char * const EMPTY_STRING = "";
 
 /* TODO duplicates logic from kernel */
@@ -63,8 +63,10 @@ static char *mount_resolve_src(const char *orig_str)
 	}
 
 	src = resolve_addrs(buf);
-	if (!src)
+	if (!src) {
+		free(buf);
 		return NULL;
+	}
 
 	len = strlen(src);
 	pos = safe_cat(&src, &len, len, ":");
@@ -152,6 +154,7 @@ static char *parse_options(const char *data, int *filesys_flags)
 		} else if (strncmp(data, "secretfile", 10) == 0) {
 			if (!value || !*value) {
 				printf("keyword secretfile found, but no secret file specified\n");
+				free(saw_name);
 				return NULL;
 			}
 
@@ -166,15 +169,18 @@ static char *parse_options(const char *data, int *filesys_flags)
 		} else if (strncmp(data, "secret", 6) == 0) {
 			if (!value || !*value) {
 				printf("mount option secret requires a value.\n");
+				free(saw_name);
 				return NULL;
 			}
 
 			/* secret is only added to kernel options as
-			   backwards compatilbity, if add_key doesn't
+			   backwards compatibility, if add_key doesn't
 			   recognize our keytype; hence, it is skipped
 			   here and appended to options on add_key
 			   failure */
-			strncpy(secret, value, sizeof(secret));
+			size_t len = sizeof(secret);
+			strncpy(secret, value, len-1);
+			secret[len-1] = '\0';
 			saw_secret = secret;
 			skip = 1;
 		} else if (strncmp(data, "name", 4) == 0) {
@@ -184,9 +190,8 @@ static char *parse_options(const char *data, int *filesys_flags)
 			}
 
 			/* take a copy of the name, to be used for
-			   naming the keys that we add to kernel;
-			   ignore memleak as mount.ceph is
-			   short-lived */
+			   naming the keys that we add to kernel; */
+			free(saw_name);
 			saw_name = strdup(value);
 			if (!saw_name) {
 				printf("out of memory.\n");
@@ -195,8 +200,10 @@ static char *parse_options(const char *data, int *filesys_flags)
 			skip = 0;
 		} else {
 			skip = 0;
-			if (verboseflag)
-				printf("ceph: Unknown mount option %s\n",data);
+			if (verboseflag) {
+			  fprintf(stderr, "mount.ceph: unrecognized mount option \"%s\", "
+			                  "passing to kernel.\n", data);
+            }
 		}
 
 		/* Copy (possibly modified) option to out */
@@ -227,6 +234,7 @@ static char *parse_options(const char *data, int *filesys_flags)
 		char secret_option[MAX_SECRET_OPTION_LEN];
 		ret = get_secret_option(saw_secret, name, secret_option, sizeof(secret_option));
 		if (ret < 0) {
+			free(saw_name);
 			return NULL;
 		} else {
 			if (pos) {
@@ -236,6 +244,7 @@ static char *parse_options(const char *data, int *filesys_flags)
 		}
 	}
 
+	free(saw_name);
 	if (!out)
 		return strdup(EMPTY_STRING);
 	return out;
@@ -267,6 +276,8 @@ static int parse_arguments(int argc, char *const *const argv,
 	for (i = 3; i < argc; ++i) {
 		if (!strcmp("-h", argv[i]))
 			return 1;
+		else if (!strcmp("-n", argv[i]))
+			skip_mtab_flag = 1;
 		else if (!strcmp("-v", argv[i]))
 			verboseflag = 1;
 		else if (!strcmp("-o", argv[i])) {
@@ -287,36 +298,22 @@ static int parse_arguments(int argc, char *const *const argv,
 
 /* modprobe failing doesn't necessarily prevent from working, so this
    returns void */
-static void modprobe(void) {
-	int status;
-	status = system("/sbin/modprobe ceph");
-	if (status < 0) {
-		char error_buf[80];
-		fprintf(stderr, "mount.ceph: cannot run modprobe: %s\n",
-				strerror_r(errno, error_buf, sizeof(error_buf)));
-	} else if (WIFEXITED(status)) {
-		status = WEXITSTATUS(status);
-		if (status != 0) {
-			fprintf(stderr,
-				"mount.ceph: modprobe failed, exit status %d\n",
-				status);
-		}
-	} else if (WIFSIGNALED(status)) {
-		fprintf(stderr,
-			"mount.ceph: modprobe failed with signal %d\n",
-			WTERMSIG(status));
-	} else {
-		fprintf(stderr, "mount.ceph: weird status from modprobe: %d\n",
-			status);
-	}
+static void modprobe(void)
+{
+	int r;
+
+	r = module_load("ceph", NULL);
+	if (r)
+		printf("failed to load ceph kernel module (%d)\n", r);
 }
 
 static void usage(const char *prog_name)
 {
-	printf("usage: %s [src] [mount-point] [-v] [-o ceph-options]\n",
+	printf("usage: %s [src] [mount-point] [-n] [-v] [-o ceph-options]\n",
 		prog_name);
 	printf("options:\n");
 	printf("\t-h: Print this help\n");
+	printf("\t-n: Do not update /etc/mtab\n");
 	printf("\t-v: Verbose\n");
 	printf("\tceph-options: refer to mount.ceph(8)\n");
 	printf("\n");
@@ -362,7 +359,9 @@ int main(int argc, char *argv[])
 			printf("mount error %d = %s\n",errno,strerror(errno));
 		}
 	} else {
-		update_mtab_entry(rsrc, node, "ceph", popts, flags, 0, 0);
+		if (!skip_mtab_flag) {
+			update_mtab_entry(rsrc, node, "ceph", popts, flags, 0, 0);
+		}
 	}
 
 	block_signals(SIG_UNBLOCK);

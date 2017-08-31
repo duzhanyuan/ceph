@@ -18,18 +18,12 @@
 #include "Cond.h"
 #include "Mutex.h"
 
-#include <map>
-
 class CephContext;
 class Context;
 class SafeTimerThread;
 
 class SafeTimer
 {
-  // This class isn't supposed to be copied
-  SafeTimer(const SafeTimer &rhs);
-  SafeTimer& operator=(const SafeTimer &rhs);
-
   CephContext *cct;
   Mutex& lock;
   Cond cond;
@@ -48,6 +42,10 @@ class SafeTimer
   void dump(const char *caller = 0) const;
 
 public:
+  // This class isn't supposed to be copied
+  SafeTimer(const SafeTimer&) = delete;
+  SafeTimer& operator=(const SafeTimer&) = delete;
+
   /* Safe callbacks determines whether callbacks are called with the lock
    * held.
    *
@@ -72,8 +70,8 @@ public:
 
   /* Schedule an event in the future
    * Call with the event_lock LOCKED */
-  void add_event_after(double seconds, Context *callback);
-  void add_event_at(utime_t when, Context *callback);
+  Context* add_event_after(double seconds, Context *callback);
+  Context* add_event_at(utime_t when, Context *callback);
 
   /* Cancel an event.
    * Call with the event_lock LOCKED
@@ -92,4 +90,5 @@ public:
   void cancel_all_events();
 
 };
+
 #endif

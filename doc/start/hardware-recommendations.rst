@@ -24,8 +24,8 @@ CPU
 
 Ceph metadata servers dynamically redistribute their load, which is CPU
 intensive. So your metadata servers should have significant processing power
-(e.g., quad core or better CPUs). Ceph OSDs run the RADOS service, calculate
-data placement with CRUSH, replicate data, and maintain their own copy of the
+(e.g., quad core or better CPUs). Ceph OSDs run the :term:`RADOS` service, calculate
+data placement with :term:`CRUSH`, replicate data, and maintain their own copy of the
 cluster map. Therefore, OSDs should have a reasonable amount of processing power
 (e.g., dual core processors). Monitors simply maintain a master copy of the
 cluster map, so they are not CPU intensive. You must also consider whether the
@@ -52,13 +52,10 @@ Data Storage
 Plan your data storage configuration carefully. There are significant cost and
 performance tradeoffs to consider when planning for data storage. Simultaneous
 OS operations, and simultaneous request for read and write operations from
-multiple daemons against a single drive can slow performance considerably. There
-are also file system limitations to consider: btrfs is not quite stable enough
-for production, but it has the ability to journal and write data simultaneously,
-whereas XFS and ext4 do not.
+multiple daemons against a single drive can slow performance considerably.
 
 .. important:: Since Ceph has to write all data to the journal before it can 
-   send an ACK (for XFS and EXT4 at least), having the journal and OSD 
+   send an ACK (for XFS at least), having the journal and OSD 
    performance in balance is really important!
 
 
@@ -99,8 +96,7 @@ You may run multiple Ceph OSD Daemons per hard disk drive, but this will likely
 lead to resource contention and diminish the overall throughput. You may store a
 journal and object data on the same drive, but this may increase the time it
 takes to journal a write and ACK to the client. Ceph must write to the journal
-before it can ACK the write. The btrfs filesystem can write journal data and
-object data simultaneously, whereas XFS and ext4 cannot.
+before it can ACK the write.
 
 Ceph best practices dictate that you should run operating systems, OSD data and
 OSD journals on separate drives.
@@ -115,7 +111,7 @@ SSDs often cost more than 10x as much per gigabyte when compared to a hard disk
 drive, but SSDs often exhibit access times that are at least 100x faster than a
 hard disk drive.
 
-SSDs do not have moving mechanical parts so they aren't necessarily subject to
+SSDs do not have moving mechanical parts so they are not necessarily subject to
 the same types of limitations as hard disk drives. SSDs do have significant
 limitations though. When evaluating SSDs, it is important to consider the
 performance of sequential reads and writes. An SSD that has 400MB/s sequential
@@ -192,6 +188,16 @@ is up to date. See `OS Recommendations`_ for notes on ``glibc`` and
 ``syncfs(2)`` to ensure that your hardware performs as expected when running
 multiple OSDs per host.
 
+Hosts with high numbers of OSDs (e.g., > 20) may spawn a lot of threads, 
+especially during recovery and rebalancing. Many Linux kernels default to 
+a relatively small maximum number of threads (e.g., 32k). If you encounter
+problems starting up OSDs on hosts with a high number of OSDs, consider
+setting ``kernel.pid_max`` to a higher number of threads. The theoretical
+maximum is 4,194,303 threads. For example, you could add the following to
+the ``/etc/sysctl.conf`` file:: 
+
+	kernel.pid_max = 4194303
+
 
 Networks
 ========
@@ -216,7 +222,7 @@ deployment tools  (e.g., Dell's Crowbar) deploy with five different networks,
 but employ VLANs to make hardware and network cabling more manageable. VLANs
 using 802.1q protocol require VLAN-capable NICs and Switches. The added hardware
 expense may be offset by the operational cost savings for network setup and
-maintenance. When using VLANs to handle VM traffic between between the cluster
+maintenance. When using VLANs to handle VM traffic between the cluster
 and compute stacks (e.g., OpenStack, CloudStack, etc.), it is also worth
 considering using 10G Ethernet. Top-of-rack routers for each network also need
 to be able to communicate with spine routers that have even faster
@@ -255,7 +261,6 @@ and development clusters can run successfully with modest hardware.
 +==============+================+=========================================+
 | ``ceph-osd`` | Processor      | - 1x 64-bit AMD-64                      |
 |              |                | - 1x 32-bit ARM dual-core or better     |
-|              |                | - 1x i386 dual-core                     |
 |              +----------------+-----------------------------------------+
 |              | RAM            |  ~1GB for 1TB of storage per daemon     |
 |              +----------------+-----------------------------------------+
@@ -265,9 +270,8 @@ and development clusters can run successfully with modest hardware.
 |              +----------------+-----------------------------------------+
 |              | Network        |  2x 1GB Ethernet NICs                   |
 +--------------+----------------+-----------------------------------------+
-| ``ceph-mon`` | Processor      | - 1x 64-bit AMD-64/i386                 |
+| ``ceph-mon`` | Processor      | - 1x 64-bit AMD-64                      |
 |              |                | - 1x 32-bit ARM dual-core or better     |
-|              |                | - 1x i386 dual-core                     |
 |              +----------------+-----------------------------------------+
 |              | RAM            |  1 GB per daemon                        |
 |              +----------------+-----------------------------------------+
@@ -277,7 +281,6 @@ and development clusters can run successfully with modest hardware.
 +--------------+----------------+-----------------------------------------+
 | ``ceph-mds`` | Processor      | - 1x 64-bit AMD-64 quad-core            |
 |              |                | - 1x 32-bit ARM quad-core               |
-|              |                | - 1x i386 quad-core                     |
 |              +----------------+-----------------------------------------+
 |              | RAM            |  1 GB minimum per daemon                |
 |              +----------------+-----------------------------------------+
@@ -336,46 +339,12 @@ configurations for Ceph OSDs, and a lighter configuration for monitors.
 +----------------+----------------+------------------------------------+
 
 
-Calxeda Example
----------------
 
-A recent (2013) Ceph cluster project uses ARM hardware to obtain low
-power consumption and high storage density.
-
-+----------------+----------------+----------------------------------------+
-|  Configuration | Criteria       | Minimum Recommended                    |
-+================+================+========================================+
-| SuperMicro     | Processor Card |  3x Calxeda EnergyCard building blocks |
-| SC 847 Chassis +----------------+----------------------------------------+
-| 4U             | CPU            |  4x ECX-1000 ARM 1.4 GHz SoC per card  |
-|                +----------------+----------------------------------------+
-|                | RAM            |  4 GB per System-on-a-chip (SoC)       |
-|                +----------------+----------------------------------------+
-|                | Volume Storage |  36x 3TB Seagate Barracuda SATA        |
-|                +----------------+----------------------------------------+
-|                | Client Network |  1x 10GB Ethernet NICs                 |
-|                +----------------+----------------------------------------+
-|                | OSD Network    |  1x 10GB Ethernet NICs                 |
-|                +----------------+----------------------------------------+
-|                | Mgmt. Network  |  1x 1GB Ethernet NICs                  |
-+----------------+----------------+----------------------------------------+
-
-The chassis configuration enables the deployment of 36 Ceph OSD Daemons per
-chassis, one for each 3TB drive. Each System-on-a-chip (SoC) processor runs 3
-Ceph OSD Daemons. Four SoC processors per card allows the 12 processors to run
-36 Ceph OSD Daemons with capacity remaining for rebalancing, backfilling and
-recovery. This configuration provides 108TB of storage (slightly less after full
-ratio settings) per 4U chassis. Using a chassis exclusively for Ceph OSD Daemons
-makes it easy to expand the cluster's storage capacity significantly with
-relative ease.
-
-**Note:** the project uses Ceph for cold storage, so there are no SSDs 
-for journals.
 
 
 .. _Ceph Write Throughput 1: http://ceph.com/community/ceph-performance-part-1-disk-controller-write-throughput/
 .. _Ceph Write Throughput 2: http://ceph.com/community/ceph-performance-part-2-write-throughput-without-ssd-journals/
 .. _Argonaut v. Bobtail Performance Preview: http://ceph.com/uncategorized/argonaut-vs-bobtail-performance-preview/
 .. _Bobtail Performance - I/O Scheduler Comparison: http://ceph.com/community/ceph-bobtail-performance-io-scheduler-comparison/ 
-.. _Mapping Pools to Different Types of OSDs: http://ceph.com/docs/master/rados/operations/crush-map/#placing-different-pools-on-different-osds
+.. _Mapping Pools to Different Types of OSDs: ../../rados/operations/crush-map#placing-different-pools-on-different-osds
 .. _OS Recommendations: ../os-recommendations

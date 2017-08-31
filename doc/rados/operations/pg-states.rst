@@ -19,12 +19,6 @@ map is ``active + clean``.
 *Down*
   A replica with necessary data is down, so the placement group is offline.
 
-*Replay*
-  The placement group is waiting for clients to replay operations after an OSD crashed.
-
-*Splitting*
-  Ceph is splitting the placment group into multiple placement groups. (functional?)
-
 *Scrubbing*
   Ceph is checking the placement group for inconsistencies.
 
@@ -44,18 +38,30 @@ map is ``active + clean``.
 *Recovering*
   Ceph is migrating/synchronizing objects and their replicas.
 
+*Forced-Recovery*
+  High recovery priority of that PG is enforced by user.
+
 *Backfill*
   Ceph is scanning and synchronizing the entire contents of a placement group
   instead of inferring what contents need to be synchronized from the logs of
   recent operations. *Backfill* is a special case of recovery.
 
+*Forced-Backfill*
+  High backfill priority of that PG is enforced by user.
+
 *Wait-backfill*
   The placement group is waiting in line to start backfill.
 
+*Backfill-toofull*
+  A backfill operation is waiting because the destination OSD is over its
+  full ratio.
+
 *Incomplete*
-  Ceph detects that a placement group is missing a necessary period of history 
-  from its log.  If you see this state, report a bug, and try to start any
-  failed OSDs that may contain the needed information.
+  Ceph detects that a placement group is missing information about
+  writes that may have occurred, or does not have any healthy
+  copies. If you see this state, try to start any failed OSDs that may
+  contain the needed information. In the case of an erasure coded pool
+  temporarily reducing min_size may allow recovery.
 
 *Stale*
   The placement group is in an unknown state - the monitors have not received
@@ -64,3 +70,11 @@ map is ``active + clean``.
 *Remapped*
   The placement group is temporarily mapped to a different set of OSDs from what
   CRUSH specified.
+
+*Undersized*
+  The placement group fewer copies than the configured pool replication level.
+
+*Peered*
+  The placement group has peered, but cannot serve client IO due to not having
+  enough copies to reach the pool's configured min_size parameter.  Recovery
+  may occur in this state, so the pg may heal up to min_size eventually.

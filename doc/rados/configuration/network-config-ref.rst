@@ -71,10 +71,9 @@ There are several reasons to consider operating two separate networks:
 IP Tables
 =========
 
-By default, daemons `bind`_ to ports within the ``6800:7100`` range. You may
+By default, daemons `bind`_ to ports within the ``6800:7300`` range. You may
 configure this range at your discretion. Before configuring your IP tables,
-check the default ``iptables`` configuration. ::ports within the ``6800:7100``
-range. You may configure this range at your discretion.
+check the default ``iptables`` configuration.
 
 	sudo iptables -L
 
@@ -104,8 +103,10 @@ MDS IP Tables
 -------------
 
 A :term:`Ceph Metadata Server` listens on the first available port on the public
-network beginning at port 6800. Ensure that you open one port beginning at port
-6800 for each Ceph Metadata Server that runs on the Ceph Node. When you add the
+network beginning at port 6800. Note that this behavior is not deterministic, so
+if you are running more than one OSD or MDS on the same host, or if you restart
+the daemons within a short window of time, the daemons will bind to higher
+ports. You should open the entire 6800-7300 range by default.  When you add the
 rule using the example below, make sure you replace ``{iface}`` with the public
 network interface (e.g., ``eth0``, ``eth1``, etc.), ``{ip-address}`` with the IP
 address of the public network and ``{netmask}`` with the netmask of the public
@@ -113,43 +114,38 @@ network.
 
 For example:: 
 
-	sudo iptables -A INPUT -i {iface} -m multiport -p tcp -s {ip-address}/{netmask} --dports 6800:6810 -j ACCEPT
+	sudo iptables -A INPUT -i {iface} -m multiport -p tcp -s {ip-address}/{netmask} --dports 6800:7300 -j ACCEPT
 
 
 OSD IP Tables
 -------------
 
 By default, Ceph OSD Daemons `bind`_ to the first available ports on a Ceph Node
-beginning at port 6800. Ensure that you open at least three ports beginning at
-port 6800 for each OSD that runs on the host. Each Ceph OSD Daemon on a Ceph
-Node may use up to three ports:
+beginning at port 6800.  Note that this behavior is not deterministic, so if you
+are running more than one OSD or MDS on the same host, or if you restart the
+daemons within a short window of time, the daemons will bind to higher ports.
+Each Ceph OSD Daemon on a Ceph Node may use up to four ports:
 
 #. One for talking to clients and monitors.
 #. One for sending data to other OSDs.
-#. One for heartbeating.
+#. Two for heartbeating on each interface.
 
 .. ditaa:: 
               /---------------\
               |      OSD      |
-              |           +---+----------------+
-              |           | Clients & Monitors |
-              |           +---+----------------+
+              |           +---+----------------+-----------+
+              |           | Clients & Monitors | Heartbeat |
+              |           +---+----------------+-----------+
               |               |
-              |           +---+----------------+
-              |           | Data Replication   |
-              |           +---+----------------+
-              |               |
-              |           +---+----------------+
-              |           | Heartbeat          |
-              |           +---+----------------+
+              |           +---+----------------+-----------+
+              |           | Data Replication   | Heartbeat |
+              |           +---+----------------+-----------+
               | cCCC          |
               \---------------/
 
-Ports are node-specific, so you don't need to open any more ports than the
-number of ports needed by Ceph daemons running on that Ceph Node. You may
-consider opening a few additional ports in case a daemon fails and restarts
-without letting go of the port such that the restarted daemon binds to a new
-port. 
+When a daemon fails and restarts without letting go of the port, the restarted
+daemon will bind to a new port. You should open the entire 6800-7300 port range
+to handle this possibility.
 
 If you set up separate public and cluster networks, you must add rules for both
 the public network and the cluster network, because clients will connect using
@@ -159,12 +155,10 @@ network. When you add the rule using the example below, make sure you replace
 ``{ip-address}`` with the IP address and ``{netmask}`` with the netmask of the
 public or cluster network. For example:: 
 
-	sudo iptables -A INPUT -i {iface}  -m multiport -p tcp -s {ip-address}/{netmask} --dports 6800:6810 -j ACCEPT
+	sudo iptables -A INPUT -i {iface}  -m multiport -p tcp -s {ip-address}/{netmask} --dports 6800:7300 -j ACCEPT
 
 .. tip:: If you run Ceph Metadata Servers on the same Ceph Node as the 
    Ceph OSD Daemons, you can consolidate the public network configuration step. 
-   Ensure that you open the number of ports required for each daemon per host.
-
 
 
 Ceph Networks
@@ -190,7 +184,7 @@ often ``192.168.0.0`` or ``10.0.0.0``.
 
 .. note:: Ceph uses `CIDR`_ notation for subnets (e.g., ``10.0.0.0/24``).
 
-When you've configured your networks, you may restart your cluster or restart
+When you have configured your networks, you may restart your cluster or restart
 each daemon. Ceph daemons bind dynamically, so you do not have to restart the
 entire cluster at once if you change your network configuration.
 
@@ -204,7 +198,7 @@ section of your Ceph configuration file.
 .. code-block:: ini
 
 	[global]
-		...
+		# ... elided configuration
 		public network = {public-network/netmask}
 
 
@@ -219,7 +213,7 @@ following option to the ``[global]`` section of your Ceph configuration file.
 .. code-block:: ini
 
 	[global]
-		...
+		# ... elided configuration
 		cluster network = {cluster-network/netmask}
 
 We prefer that the cluster network is **NOT** reachable from the public network
@@ -350,10 +344,11 @@ Bind
 ----
 
 Bind settings set the default port ranges Ceph OSD and MDS daemons use. The
-default range is ``6800:7100``. Ensure that your `IP Tables`_ configuration
+default range is ``6800:7300``. Ensure that your `IP Tables`_ configuration
 allows you to use the configured port range.
 
-You may also enable Ceph daemons to bind to IPv6 addresses.
+You may also enable Ceph daemons to bind to IPv6 addresses instead of IPv4
+addresses.
 
 
 ``ms bind port min``
@@ -368,16 +363,31 @@ You may also enable Ceph daemons to bind to IPv6 addresses.
 
 :Description: The maximum port number to which an OSD or MDS daemon will bind.
 :Type: 32-bit Integer
-:Default: ``7100``
+:Default: ``7300``
 :Required: No. 
 
 
 ``ms bind ipv6``
 
-:Description: Enables Ceph daemons to bind to IPv6 addresses.
+:Description: Enables Ceph daemons to bind to IPv6 addresses. Currently the
+              messenger *either* uses IPv4 or IPv6, but it cannot do both.
 :Type: Boolean
 :Default: ``false``
 :Required: No
+
+``public bind addr``
+
+:Description: In some dynamic deployments the Ceph MON daemon might bind
+              to an IP address locally that is different from the ``public addr``
+              advertised to other peers in the network. The environment must ensure
+              that routing rules are set correclty. If ``public bind addr`` is set
+              the Ceph MON daemon will bind to it locally and use ``public addr``
+              in the monmaps to advertise its address to peers. This behavior is limited
+              to the MON daemon.
+
+:Type: IP Address
+:Required: No
+:Default: N/A
 
 
 
@@ -387,7 +397,9 @@ Hosts
 Ceph expects at least one monitor declared in the Ceph configuration file, with
 a ``mon addr`` setting under each declared monitor. Ceph expects a ``host``
 setting under each declared monitor, metadata server and OSD in the Ceph
-configuration file.
+configuration file. Optionally, a monitor can be assigned with a priority, and
+the clients will always connect to the monitor with lower value of priority if
+specified.
 
 
 ``mon addr``
@@ -400,6 +412,15 @@ configuration file.
 :Required: No
 :Default: N/A
 
+``mon priority``
+
+:Description: The priority of the declared monitor, the lower value the more
+              prefered when a client selects a monitor when trying to connect
+              to the cluster.
+
+:Type: Unsigned 16-bit Integer
+:Required: No
+:Default: 0
 
 ``host``
 
@@ -425,13 +446,13 @@ TCP
 Ceph disables TCP buffering by default.
 
 
-``tcp nodelay``
+``ms tcp nodelay``
 
-:Description: Ceph enables ``tcp nodelay`` so that each request is sent 
+:Description: Ceph enables ``ms tcp nodelay`` so that each request is sent 
               immediately (no buffering). Disabling `Nagle's algorithm`_
               increases network traffic, which can introduce latency. If you 
               experience large numbers of small packets, you may try 
-              disabling ``tcp nodelay``. 
+              disabling ``ms tcp nodelay``. 
 
 :Type: Boolean
 :Required: No
@@ -439,7 +460,7 @@ Ceph disables TCP buffering by default.
 
 
 
-``tcp rcvbuf``
+``ms tcp rcvbuf``
 
 :Description: The size of the socket buffer on the receiving end of a network
               connection. Disable by default.
@@ -453,7 +474,7 @@ Ceph disables TCP buffering by default.
 ``ms tcp read timeout``
 
 :Description: If a client or daemon makes a request to another Ceph daemon and
-              does not drop an unused connection, the ``tcp read timeout`` 
+              does not drop an unused connection, the ``ms tcp read timeout`` 
               defines the connection as idle after the specified number 
               of seconds.
 
@@ -464,9 +485,9 @@ Ceph disables TCP buffering by default.
 
 
 .. _Scalability and High Availability: ../../../architecture#scalability-and-high-availability
-.. _Hardware Recommendations - Networks: ../../../install/hardware-recommendations#networks
-.. _Ceph configuration file: ../../../start/quick-start/#add-a-configuration-file
-.. _hardware recommendations: ../../../install/hardware-recommendations
+.. _Hardware Recommendations - Networks: ../../../start/hardware-recommendations#networks
+.. _Ceph configuration file: ../../../start/quick-ceph-deploy/#create-a-cluster
+.. _hardware recommendations: ../../../start/hardware-recommendations
 .. _Monitor / OSD Interaction: ../mon-osd-interaction
 .. _Message Signatures: ../auth-config-ref#signatures
 .. _CIDR: http://en.wikipedia.org/wiki/Classless_Inter-Domain_Routing

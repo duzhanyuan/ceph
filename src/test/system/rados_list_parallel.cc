@@ -52,12 +52,13 @@ public:
   {
   }
 
-  ~RadosDeleteObjectsR()
+  ~RadosDeleteObjectsR() override
   {
   }
 
-  int run(void)
+  int run(void) override
   {
+    int ret_val = 0;
     rados_t cl;
     RETURN1_IF_NONZERO(rados_create(&cl, NULL));
     rados_conf_parse_argv(cl, m_argc, m_argv);
@@ -90,7 +91,8 @@ public:
       for (int i = 0; i < r; ++i)
 	++d;
       if (d == to_delete.end()) {
-	return -EDOM;
+	ret_val = -EDOM;
+	goto out;
       }
       std::string oid(d->second);
       to_delete.erase(d);
@@ -98,7 +100,8 @@ public:
       if (ret != 0) {
 	printf("%s: rados_remove(%s) failed with error %d\n",
 	       get_id_str(), oid.c_str(), ret);
-	return ret;
+	ret_val = ret;
+	goto out;
       }
       ++removed;
       if ((removed % 25) == 0) {
@@ -112,10 +115,11 @@ public:
 
     printf("%s: removed %d objects\n", get_id_str(), removed);
 
+out:
     rados_ioctx_destroy(io_ctx);
     rados_shutdown(cl);
 
-    return 0;
+    return ret_val;
   }
 private:
   std::string m_pool_name;
@@ -133,12 +137,13 @@ public:
   {
   }
 
-  ~RadosAddObjectsR()
+  ~RadosAddObjectsR() override
   {
   }
 
-  int run(void)
+  int run(void) override
   {
+    int ret_val = 0;
     rados_t cl;
     RETURN1_IF_NONZERO(rados_create(&cl, NULL));
     rados_conf_parse_argv(cl, m_argc, m_argv);
@@ -171,17 +176,19 @@ public:
       for (int i = 0; i < r; ++i)
 	++d;
       if (d == to_add.end()) {
-	return -EDOM;
+	ret_val = -EDOM;
+	goto out;
       }
       std::string oid(d->second);
       to_add.erase(d);
 
       std::string buf(StRadosCreatePool::get_random_buf(256));
       int ret = rados_write(io_ctx, oid.c_str(), buf.c_str(), buf.size(), 0);
-      if (ret != (int)buf.size()) {
+      if (ret != 0) {
 	printf("%s: rados_write(%s) failed with error %d\n",
 	       get_id_str(), oid.c_str(), ret);
-	return ret;
+	ret_val = ret;
+	goto out;
       }
       ++added;
       if ((added % 25) == 0) {
@@ -195,10 +202,11 @@ public:
 
     printf("%s: added %d objects\n", get_id_str(), added);
 
+  out:
     rados_ioctx_destroy(io_ctx);
     rados_shutdown(cl);
 
-    return 0;
+    return ret_val;
   }
 private:
   std::string m_pool_name;
@@ -213,9 +221,9 @@ const char *get_id_str()
 int main(int argc, const char **argv)
 {
   const char *num_objects = getenv("NUM_OBJECTS");
-  std::string pool = "foo." + stringify(getpid());
+  const std::string pool = get_temp_pool_name(argv[0]);
   if (num_objects) {
-    g_num_objects = atoi(num_objects); 
+    g_num_objects = atoi(num_objects);
     if (g_num_objects == 0)
       return 100;
   }
@@ -326,6 +334,15 @@ int main(int argc, const char **argv)
     }
   }
 
-  printf("******* SUCCESS **********\n"); 
+  rados_t cl;
+  rados_create(&cl, NULL);
+  rados_conf_parse_argv(cl, argc, argv);
+  rados_conf_parse_argv(cl, argc, argv);
+  rados_conf_read_file(cl, NULL);
+  rados_conf_parse_env(cl, NULL);
+  rados_connect(cl);
+  rados_pool_delete(cl, pool.c_str());
+
+  printf("******* SUCCESS **********\n");
   return EXIT_SUCCESS;
 }

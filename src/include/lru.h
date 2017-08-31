@@ -41,7 +41,7 @@ class LRUObject {
   // pin/unpin item in cache
   void lru_pin(); 
   void lru_unpin();
-  bool lru_is_expireable() { return !lru_pinned; }
+  bool lru_is_expireable() const { return !lru_pinned; }
 
   friend class LRU;
   friend class LRUList;
@@ -59,7 +59,7 @@ class LRUList {
     len = 0;
   }
   
-  uint32_t  get_length() { return len; }
+  uint32_t  get_length() const { return len; }
 
   LRUObject *get_head() {
     return head;
@@ -136,12 +136,12 @@ class LRU {
     lru_max = max;
   }
 
-  uint32_t lru_get_size() { return lru_num; }
-  uint32_t lru_get_top() { return lru_top.get_length(); }
-  uint32_t lru_get_bot() { return lru_bot.get_length(); }
-  uint32_t lru_get_pintail() { return lru_pintail.get_length(); }
-  uint32_t lru_get_max() { return lru_max; }
-  uint32_t lru_get_num_pinned() { return lru_num_pinned; }
+  uint32_t lru_get_size() const { return lru_num; }
+  uint32_t lru_get_top() const { return lru_top.get_length(); }
+  uint32_t lru_get_bot() const{ return lru_bot.get_length(); }
+  uint32_t lru_get_pintail() const { return lru_pintail.get_length(); }
+  uint32_t lru_get_max() const { return lru_max; }
+  uint32_t lru_get_num_pinned() const { return lru_num_pinned; }
 
   void lru_set_max(uint32_t m) { lru_max = m; }
   void lru_set_midpoint(float f) { lru_midpoint = f; }
@@ -150,6 +150,7 @@ class LRU {
     lru_top.clear();
     lru_bot.clear();
     lru_pintail.clear();
+    lru_num = 0;
   }
 
   // insert at top of lru
@@ -314,14 +315,16 @@ class LRU {
 };
 
 
-inline void LRUObject::lru_pin() 
-{
+inline void LRUObject::lru_pin() {
+  if (lru && !lru_pinned) {
+    lru->lru_num_pinned++;
+    lru->lru_adjust();
+  }
   lru_pinned = true;
-  if (lru) lru->lru_num_pinned++;
 }
+
 inline void LRUObject::lru_unpin() {
-  lru_pinned = false;
-  if (lru) {
+  if (lru && lru_pinned) {
     lru->lru_num_pinned--;
 
     // move from pintail -> bot
@@ -329,7 +332,9 @@ inline void LRUObject::lru_unpin() {
       lru->lru_pintail.remove(this);
       lru->lru_bot.insert_tail(this);
     }
+    lru->lru_adjust();
   }
+  lru_pinned = false;
 }
 
 #endif

@@ -16,35 +16,33 @@
 #ifndef CEPH_MGETPOOLSTATSREPLY_H
 #define CEPH_MGETPOOLSTATSREPLY_H
 
-#include <uuid/uuid.h>
-
 class MGetPoolStatsReply : public PaxosServiceMessage {
 public:
   uuid_d fsid;
   map<string,pool_stat_t> pool_stats;
 
   MGetPoolStatsReply() : PaxosServiceMessage(MSG_GETPOOLSTATSREPLY, 0) {}
-  MGetPoolStatsReply(uuid_d& f, tid_t t, version_t v) :
+  MGetPoolStatsReply(uuid_d& f, ceph_tid_t t, version_t v) :
     PaxosServiceMessage(MSG_GETPOOLSTATSREPLY, v),
     fsid(f) {
     set_tid(t);
   }
 
 private:
-  ~MGetPoolStatsReply() {}
+  ~MGetPoolStatsReply() override {}
 
 public:
-  const char *get_type_name() const { return "getpoolstats"; }
-  void print(ostream& out) const {
+  const char *get_type_name() const override { return "getpoolstats"; }
+  void print(ostream& out) const override {
     out << "getpoolstatsreply(" << get_tid() << " v" << version <<  ")";
   }
 
-  void encode_payload(uint64_t features) {
+  void encode_payload(uint64_t features) override {
     paxos_encode();
     ::encode(fsid, payload);
     ::encode(pool_stats, payload, features);
   }
-  void decode_payload() {
+  void decode_payload() override {
     bufferlist::iterator p = payload.begin();
     paxos_decode(p);
     ::decode(fsid, p);

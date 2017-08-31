@@ -22,17 +22,23 @@ See `libcephfs (javadoc)`_.
 Ceph Block Device APIs
 ======================
 
-See `librbdpy`_. 
+See `librbdpy`_.
 
 .. _librbdpy: ../rbd/librbdpy
 
+Ceph RADOS Gateway APIs
+=======================
+
+See `librgw-py`_.
+
+.. _librgw-py: ../radosgw/api
 
 Ceph Object Store APIs
 ======================
 
 - See `S3-compatible API`_.
 - See `Swift-compatible API`_.
-- See `Admin Ops API`_. 
+- See `Admin Ops API`_.
 
 .. _S3-compatible API: ../radosgw/s3/
 .. _Swift-compatible API: ../radosgw/swift/

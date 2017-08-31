@@ -18,26 +18,24 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#include <iostream>
+#include <iosfwd>
 #include <iomanip>
 using namespace std;
 
-#include <ext/hash_map>
-using namespace __gnu_cxx;
+#include "include/unordered_map.h"
 
 #include "hash.h"
 #include "encoding.h"
 #include "ceph_hash.h"
 #include "cmp.h"
 
-/// Maximum supported object name length for Ceph, in bytes.
-#define MAX_CEPH_OBJECT_NAME_LEN 4096
-
 struct object_t {
   string name;
 
   object_t() {}
+  // cppcheck-suppress noExplicitConstructor
   object_t(const char *s) : name(s) {}
+  // cppcheck-suppress noExplicitConstructor
   object_t(const string& s) : name(s) {}
 
   void swap(object_t& o) {
@@ -78,7 +76,7 @@ inline ostream& operator<<(ostream& out, const object_t& o) {
   return out << o.name;
 }
 
-namespace __gnu_cxx {
+namespace std {
   template<> struct hash<object_t> {
     size_t operator()(const object_t& r) const { 
       //static hash<string> H;
@@ -86,12 +84,12 @@ namespace __gnu_cxx {
       return ceph_str_hash_linux(r.name.c_str(), r.name.length());
     }
   };
-}
+} // namespace std
 
 
 struct file_object_t {
   uint64_t ino, bno;
-  mutable char buf[33];
+  mutable char buf[34];
 
   file_object_t(uint64_t i=0, uint64_t b=0) : ino(i), bno(b) {
     buf[0] = 0;
@@ -99,7 +97,7 @@ struct file_object_t {
   
   const char *c_str() const {
     if (!buf[0])
-      sprintf(buf, "%llx.%08llx", (long long unsigned)ino, (long long unsigned)bno);
+      snprintf(buf, sizeof(buf), "%llx.%08llx", (long long unsigned)ino, (long long unsigned)bno);
     return buf;
   }
 
@@ -114,6 +112,7 @@ struct file_object_t {
 
 struct snapid_t {
   uint64_t val;
+  // cppcheck-suppress noExplicitConstructor
   snapid_t(uint64_t v=0) : val(v) {}
   snapid_t operator+=(snapid_t o) { val += o.val; return *this; }
   snapid_t operator++() { ++val; return *this; }
@@ -123,7 +122,24 @@ struct snapid_t {
 inline void encode(snapid_t i, bufferlist &bl) { encode(i.val, bl); }
 inline void decode(snapid_t &i, bufferlist::iterator &p) { decode(i.val, p); }
 
-inline ostream& operator<<(ostream& out, snapid_t s) {
+template<>
+struct denc_traits<snapid_t> {
+  static constexpr bool supported = true;
+  static constexpr bool featured = false;
+  static constexpr bool bounded = true;
+  static constexpr bool need_contiguous = true;
+  static void bound_encode(const snapid_t& o, size_t& p) {
+    denc(o.val, p);
+  }
+  static void encode(const snapid_t &o, buffer::list::contiguous_appender& p) {
+    denc(o.val, p);
+  }
+  static void decode(snapid_t& o, buffer::ptr::iterator &p) {
+    denc(o.val, p);
+  }
+};
+
+inline ostream& operator<<(ostream& out, const snapid_t& s) {
   if (s == CEPH_NOSNAP)
     return out << "head";
   else if (s == CEPH_SNAPDIR)
@@ -179,7 +195,7 @@ inline bool operator<=(const sobject_t &l, const sobject_t &r) {
 inline ostream& operator<<(ostream& out, const sobject_t &o) {
   return out << o.oid << "/" << o.snap;
 }
-namespace __gnu_cxx {
+namespace std {
   template<> struct hash<sobject_t> {
     size_t operator()(const sobject_t &r) const {
       static hash<object_t> H;
@@ -187,6 +203,6 @@ namespace __gnu_cxx {
       return H(r.oid) ^ I(r.snap);
     }
   };
-}
+} // namespace std
 
 #endif

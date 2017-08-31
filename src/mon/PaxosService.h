@@ -15,10 +15,7 @@
 #ifndef CEPH_PAXOSSERVICE_H
 #define CEPH_PAXOSSERVICE_H
 
-#include "messages/PaxosServiceMessage.h"
 #include "include/Context.h"
-#include "include/stringify.h"
-#include <errno.h>
 #include "Paxos.h"
 #include "Monitor.h"
 #include "MonitorDBStore.h"
@@ -56,7 +53,9 @@ class PaxosService {
    */
   bool proposing;
 
- protected:
+  bool need_immediate_propose = false;
+
+protected:
   /**
    * Services implementing us used to depend on the Paxos version, back when
    * each service would have a Paxos instance for itself. However, now we only
@@ -78,14 +77,22 @@ class PaxosService {
    */
   bool have_pending; 
 
+  /**
+   * health checks for this service
+   *
+   * Child must populate this during encode_pending() by calling encode_health().
+   */
+  health_check_map_t health_checks;
 protected:
-
   /**
    * format of our state in leveldb, 0 for default
    */
   version_t format_version;
 
-
+public:
+  const health_check_map_t& get_health_checks() {
+    return health_checks;
+  }
 
   /**
    * @defgroup PaxosService_h_callbacks Callback classes
@@ -102,93 +109,29 @@ protected:
    * instance of this class onto the Paxos::wait_for_readable function, and
    * we will retry the whole dispatch again once the callback is fired.
    */
-  class C_RetryMessage : public Context {
+  class C_RetryMessage : public C_MonOp {
     PaxosService *svc;
-    PaxosServiceMessage *m;
   public:
-    C_RetryMessage(PaxosService *s, PaxosServiceMessage *m_) : svc(s), m(m_) {}
-    void finish(int r) {
+    C_RetryMessage(PaxosService *s, MonOpRequestRef op_) :
+      C_MonOp(op_), svc(s) { }
+    void _finish(int r) override {
       if (r == -EAGAIN || r >= 0)
-	svc->dispatch(m);
+	svc->dispatch(op);
       else if (r == -ECANCELED)
-	m->put();
+        return;
       else
 	assert(0 == "bad C_RetryMessage return value");
     }
   };
 
   /**
-   * Callback used to make sure we call the PaxosService::_active function
-   * whenever a condition is fulfilled.
-   *
-   * This is used in multiple situations, from waiting for the Paxos to commit
-   * our proposed value, to waiting for the Paxos to become active once an
-   * election is finished.
-   */
-  class C_Active : public Context {
-    PaxosService *svc;
-  public:
-    C_Active(PaxosService *s) : svc(s) {}
-    void finish(int r) {
-      if (r >= 0)
-	svc->_active();
-    }
-  };
-
-  /**
-   * Callback class used to propose the pending value once the proposal_timer
-   * fires up.
-   */
-  class C_Propose : public Context {
-    PaxosService *ps;
-  public:
-    C_Propose(PaxosService *p) : ps(p) { }
-    void finish(int r) {
-      ps->proposal_timer = 0;
-      if (r >= 0)
-	ps->propose_pending();
-      else if (r == -ECANCELED || r == -EAGAIN)
-	return;
-      else
-	assert(0 == "bad return value for C_Propose");
-    }
-  };
-
-  /**
-   * Callback class used to mark us as active once a proposal finishes going
-   * through Paxos.
-   *
-   * We should wake people up *only* *after* we inform the service we
-   * just went active. And we should wake people up only once we finish
-   * going active. This is why we first go active, avoiding to wake up the
-   * wrong people at the wrong time, such as waking up a C_RetryMessage
-   * before waking up a C_Active, thus ending up without a pending value.
-   */
-  class C_Committed : public Context {
-    PaxosService *ps;
-  public:
-    C_Committed(PaxosService *p) : ps(p) { }
-    void finish(int r) {
-      ps->proposing = false;
-      if (r >= 0)
-	ps->_active();
-      else if (r == -ECANCELED || r == -EAGAIN)
-	return;
-      else
-	assert(0 == "bad return value for C_Committed");
-    }
-  };
-  /**
    * @}
    */
-  friend class C_Propose;
-  
 
-public:
   /**
    * @param mn A Monitor instance
    * @param p A Paxos instance
-   * @parem name Our service's name.
+   * @param name Our service's name.
    */
   PaxosService(Monitor *mn, Paxos *p, string name) 
     : mon(mn), paxos(p), service_name(name),
@@ -253,15 +196,10 @@ private:
    * @remarks We only create a pending state we our Monitor is the Leader.
    *
    * @pre Paxos is active
-   * @post have_pending is true iif our Monitor is the Leader and Paxos is
+   * @post have_pending is true if our Monitor is the Leader and Paxos is
    *	   active
    */
   void _active();
-  /**
-   * Scrub our versions after we convert the store from the old layout to
-   * the new k/v store.
-   */
-  void remove_legacy_versions();
 
 public:
   /**
@@ -319,9 +257,10 @@ public:
    * @param m A message
    * @returns 'true' on successful dispatch; 'false' otherwise.
    */
-  bool dispatch(PaxosServiceMessage *m);
+  bool dispatch(MonOpRequestRef op);
 
   void refresh(bool *need_bootstrap);
+  void post_refresh();
 
   /**
    * @defgroup PaxosService_h_override_funcs Functions that should be
@@ -342,8 +281,6 @@ public:
   /**
    * Query the Paxos system for the latest state and apply it if it's newer
    * than the current Monitor state.
-   *
-   * @returns 'true' on success; 'false' otherwise.
    */
   virtual void update_from_paxos(bool *need_bootstrap) = 0;
 
@@ -380,7 +317,7 @@ public:
    *
    * @param t The transaction to hold all changes.
    */
-  virtual void encode_pending(MonitorDBStore::Transaction *t) = 0;
+  virtual void encode_pending(MonitorDBStore::TransactionRef t) = 0;
 
   /**
    * Discard the pending state
@@ -402,7 +339,7 @@ public:
    *	      answered, was a state change that has no effect); 'false' 
    *	      otherwise.
    */
-  virtual bool preprocess_query(PaxosServiceMessage *m) = 0;
+  virtual bool preprocess_query(MonOpRequestRef op) = 0;
 
   /**
    * Apply the message to the pending state.
@@ -413,7 +350,7 @@ public:
    * @returns 'true' if the update message was handled (e.g., a command that
    *	      went through); 'false' otherwise.
    */
-  virtual bool prepare_update(PaxosServiceMessage *m) = 0;
+  virtual bool prepare_update(MonOpRequestRef op) = 0;
   /**
    * @}
    */
@@ -427,6 +364,15 @@ public:
    * @returns 'true' if the Paxos system should propose; 'false' otherwise.
    */
   virtual bool should_propose(double &delay);
+
+  /**
+   * force an immediate propose.
+   *
+   * This is meant to be called from prepare_update(op).
+   */
+  void force_immediate_propose() {
+    need_immediate_propose = true;
+  }
 
   /**
    * @defgroup PaxosService_h_courtesy Courtesy functions
@@ -486,7 +432,17 @@ public:
    * @param detail optional list of detailed problem reports; may be NULL
    */
   virtual void get_health(list<pair<health_status_t,string> >& summary,
-			  list<pair<health_status_t,string> > *detail) const { }
+			  list<pair<health_status_t,string> > *detail,
+			  CephContext *cct) const { }
+
+  void encode_health(const health_check_map_t& next,
+		     MonitorDBStore::TransactionRef t) {
+    bufferlist bl;
+    ::encode(next, bl);
+    t->put("health", service_name, bl);
+    mon->log_health(next, health_checks, t);
+  }
+  void load_health();
 
  private:
   /**
@@ -549,7 +505,7 @@ public:
   bool is_active() {
     return
       !is_proposing() &&
-      (paxos->is_active() || paxos->is_updating());
+      (paxos->is_active() || paxos->is_updating() || paxos->is_writing());
   }
 
   /**
@@ -566,7 +522,6 @@ public:
    */
   bool is_readable(version_t ver = 0) {
     if (ver > get_last_committed() ||
-	is_proposing() ||
 	!paxos->is_readable(0) ||
 	get_last_committed() == 0)
       return false;
@@ -580,15 +535,12 @@ public:
    *
    *  - we are not proposing a new version;
    *  - we are ready to be written to -- i.e., we have a pending value.
-   *  - paxos is (active or updating)
+   *  - paxos is (active or updating or writing or refresh)
    *
    * @returns true if writeable; false otherwise
    */
   bool is_writeable() {
-    return
-      !is_proposing() &&
-      is_write_ready() &&
-      (paxos->is_active() || paxos->is_updating());
+    return is_write_ready(); 
   }
 
   /**
@@ -609,8 +561,14 @@ public:
    *
    * @param c The callback to be awaken once the proposal is finished.
    */
-  void wait_for_finished_proposal(Context *c) {
+  void wait_for_finished_proposal(MonOpRequestRef op, Context *c) {
+    if (op)
+      op->mark_event_string(service_name + ":wait_for_finished_proposal");
     waiting_for_finished_proposal.push_back(c);
+  }
+  void wait_for_finished_proposal_ctx(Context *c) {
+    MonOpRequestRef o;
+    wait_for_finished_proposal(o, c);
   }
 
   /**
@@ -618,12 +576,19 @@ public:
    *
    * @param c The callback to be awaken once we become active.
    */
-  void wait_for_active(Context *c) {
+  void wait_for_active(MonOpRequestRef op, Context *c) {
+    if (op)
+      op->mark_event_string(service_name + ":wait_for_active");
+
     if (!is_proposing()) {
-      paxos->wait_for_active(c);
+      paxos->wait_for_active(op, c);
       return;
     }
-    wait_for_finished_proposal(c);
+    wait_for_finished_proposal(op, c);
+  }
+  void wait_for_active_ctx(Context *c) {
+    MonOpRequestRef o;
+    wait_for_active(o, c);
   }
 
   /**
@@ -632,19 +597,31 @@ public:
    * @param c The callback to be awaken once we become active.
    * @param ver The version we want to wait on.
    */
-  void wait_for_readable(Context *c, version_t ver = 0) {
+  void wait_for_readable(MonOpRequestRef op, Context *c, version_t ver = 0) {
     /* This is somewhat of a hack. We only do check if a version is readable on
      * PaxosService::dispatch(), but, nonetheless, we must make sure that if that
      * is why we are not readable, then we must wait on PaxosService and not on
      * Paxos; otherwise, we may assert on Paxos::wait_for_readable() if it
      * happens to be readable at that specific point in time.
      */
+    if (op)
+      op->mark_event_string(service_name + ":wait_for_readable");
+
     if (is_proposing() ||
 	ver > get_last_committed() ||
 	get_last_committed() == 0)
-      wait_for_finished_proposal(c);
-    else
-      paxos->wait_for_readable(c);
+      wait_for_finished_proposal(op, c);
+    else {
+      if (op)
+        op->mark_event_string(service_name + ":wait_for_readable/paxos");
+
+      paxos->wait_for_readable(op, c);
+    }
+  }
+
+  void wait_for_readable_ctx(Context *c, version_t ver = 0) {
+    MonOpRequestRef o; // will initialize the shared_ptr to NULL
+    wait_for_readable(o, c, ver);
   }
 
   /**
@@ -652,17 +629,25 @@ public:
    *
    * @param c The callback to be awaken once we become writeable.
    */
-  void wait_for_writeable(Context *c) {
+  void wait_for_writeable(MonOpRequestRef op, Context *c) {
+    if (op)
+      op->mark_event_string(service_name + ":wait_for_writeable");
+
     if (is_proposing())
-      wait_for_finished_proposal(c);
+      wait_for_finished_proposal(op, c);
     else if (!is_write_ready())
-      wait_for_active(c);
+      wait_for_active(op, c);
     else
-      paxos->wait_for_writeable(c);
+      paxos->wait_for_writeable(op, c);
+  }
+  void wait_for_writeable_ctx(Context *c) {
+    MonOpRequestRef o;
+    wait_for_writeable(o, c);
   }
 
+  
   /**
-   * @defgroup PaxosService_h_Trim
+   * @defgroup PaxosService_h_Trim Functions for trimming states
    * @{
    */
   /**
@@ -673,14 +658,14 @@ public:
   void maybe_trim();
 
   /**
-   * Auxiliary function to trim our state from version @from to version @to,
-   * not including; i.e., the interval [from, to[
+   * Auxiliary function to trim our state from version @p from to version
+   * @p to, not including; i.e., the interval [from, to[
    *
    * @param t The transaction to which we will add the trim operations.
    * @param from the lower limit of the interval to be trimmed
    * @param to the upper limit of the interval to be trimmed (not including)
    */
-  void trim(MonitorDBStore::Transaction *t, version_t from, version_t to);
+  void trim(MonitorDBStore::TransactionRef t, version_t from, version_t to);
 
   /**
    * encode service-specific extra bits into trim transaction
@@ -688,7 +673,8 @@ public:
    * @param tx transaction
    * @param first new first_committed value
    */
-  virtual void encode_trim_extra(MonitorDBStore::Transaction *tx, version_t first) {}
+  virtual void encode_trim_extra(MonitorDBStore::TransactionRef tx,
+				 version_t first) {}
 
   /**
    * Get the version we should trim to.
@@ -722,7 +708,7 @@ public:
    *
    * @param t Transaction on which the full version shall be encoded.
    */
-  virtual void encode_full(MonitorDBStore::Transaction *t) = 0;
+  virtual void encode_full(MonitorDBStore::TransactionRef t) = 0;
 
   /**
    * @}
@@ -747,7 +733,7 @@ public:
    *					   purposes
    * @{
    */
-  void put_first_committed(MonitorDBStore::Transaction *t, version_t ver) {
+  void put_first_committed(MonitorDBStore::TransactionRef t, version_t ver) {
     t->put(get_service_name(), first_committed_name, ver);
   }
   /**
@@ -756,7 +742,7 @@ public:
    * @param t A transaction to which we add this put operation
    * @param ver The last committed version number being put
    */
-  void put_last_committed(MonitorDBStore::Transaction *t, version_t ver) {
+  void put_last_committed(MonitorDBStore::TransactionRef t, version_t ver) {
     t->put(get_service_name(), last_committed_name, ver);
 
     /* We only need to do this once, and that is when we are about to make our
@@ -775,7 +761,7 @@ public:
    * @param ver The version to which we will add the value
    * @param bl A bufferlist containing the version's value
    */
-  void put_version(MonitorDBStore::Transaction *t, version_t ver,
+  void put_version(MonitorDBStore::TransactionRef t, version_t ver,
 		   bufferlist& bl) {
     t->put(get_service_name(), ver, bl);
   }
@@ -787,7 +773,7 @@ public:
    * @param ver A version number
    * @param bl A bufferlist containing the version's value
    */
-  void put_version_full(MonitorDBStore::Transaction *t,
+  void put_version_full(MonitorDBStore::TransactionRef t,
 			version_t ver, bufferlist& bl) {
     string key = mon->store->combine_strings(full_prefix_name, ver);
     t->put(get_service_name(), key, bl);
@@ -799,7 +785,7 @@ public:
    * @param t The transaction to which we will add this put operation
    * @param ver A version number
    */
-  void put_version_latest_full(MonitorDBStore::Transaction *t, version_t ver) {
+  void put_version_latest_full(MonitorDBStore::TransactionRef t, version_t ver) {
     string key = mon->store->combine_strings(full_prefix_name, full_latest_name);
     t->put(get_service_name(), key, ver);
   }
@@ -810,8 +796,21 @@ public:
    * @param key The key to which we will add the value
    * @param bl A bufferlist containing the value
    */
-  void put_value(MonitorDBStore::Transaction *t, const string& key, bufferlist& bl) {
+  void put_value(MonitorDBStore::TransactionRef t,
+		 const string& key, bufferlist& bl) {
     t->put(get_service_name(), key, bl);
+  }
+
+  /**
+   * Put integer value @v into the key @p key.
+   *
+   * @param t A transaction to which we will add this put operation
+   * @param key The key to which we will add the value
+   * @param v An integer
+   */
+  void put_value(MonitorDBStore::TransactionRef t,
+		 const string& key, version_t v) {
+    t->put(get_service_name(), key, v);
   }
 
   /**
@@ -834,7 +833,7 @@ public:
    *
    * @returns Our first committed version (that is available)
    */
-  version_t get_first_committed() {
+  version_t get_first_committed() const{
     return cached_first_committed;
   }
   /**
@@ -842,7 +841,7 @@ public:
    *
    * @returns Our last committed version
    */
-  version_t get_last_committed() {
+  version_t get_last_committed() const{
     return cached_last_committed;
   }
 
@@ -857,7 +856,7 @@ public:
    * @param bl The bufferlist to be populated
    * @return 0 on success; <0 otherwise
    */
-  int get_version(version_t ver, bufferlist& bl) {
+  virtual int get_version(version_t ver, bufferlist& bl) {
     return mon->store->get(get_service_name(), ver, bl);
   }
   /**
@@ -867,7 +866,7 @@ public:
    * @param bl The bufferlist to be populated
    * @returns 0 on success; <0 otherwise
    */
-  int get_version_full(version_t ver, bufferlist& bl) {
+  virtual int get_version_full(version_t ver, bufferlist& bl) {
     string key = mon->store->combine_strings(full_prefix_name, ver);
     return mon->store->get(get_service_name(), key, bl);
   }

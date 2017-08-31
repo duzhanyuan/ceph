@@ -16,6 +16,7 @@
 #ifndef CEPH_MOSDPGQUERY_H
 #define CEPH_MOSDPGQUERY_H
 
+#include "common/hobject.h"
 #include "msg/Message.h"
 
 /*
@@ -23,32 +24,37 @@
  */
 
 class MOSDPGQuery : public Message {
-  static const int HEAD_VERSION = 2;
-  static const int COMPAT_VERSION = 1;
-  version_t       epoch;
+  static const int HEAD_VERSION = 4;
+  static const int COMPAT_VERSION = 4;
+
+  version_t epoch = 0;
 
  public:
-  version_t get_epoch() { return epoch; }
-  map<pg_t,pg_query_t>  pg_list;
+  version_t get_epoch() const { return epoch; }
+  map<spg_t, pg_query_t>  pg_list;
 
   MOSDPGQuery() : Message(MSG_OSD_PG_QUERY,
 			  HEAD_VERSION,
-			  COMPAT_VERSION) {}
-  MOSDPGQuery(epoch_t e, map<pg_t,pg_query_t>& ls) :
+			  COMPAT_VERSION) {
+    set_priority(CEPH_MSG_PRIO_HIGH);
+  }
+  MOSDPGQuery(epoch_t e, map<spg_t,pg_query_t>& ls) :
     Message(MSG_OSD_PG_QUERY,
 	    HEAD_VERSION,
 	    COMPAT_VERSION),
     epoch(e) {
     pg_list.swap(ls);
+    set_priority(CEPH_MSG_PRIO_HIGH);
   }
 private:
-  ~MOSDPGQuery() {}
+  ~MOSDPGQuery() override {}
 
 public:  
-  const char *get_type_name() const { return "pg_query"; }
-  void print(ostream& out) const {
+  const char *get_type_name() const override { return "pg_query"; }
+  void print(ostream& out) const override {
     out << "pg_query(";
-    for (map<pg_t,pg_query_t>::const_iterator p = pg_list.begin(); p != pg_list.end(); ++p) {
+    for (map<spg_t,pg_query_t>::const_iterator p = pg_list.begin();
+	 p != pg_list.end(); ++p) {
       if (p != pg_list.begin())
 	out << ",";
       out << p->first;
@@ -56,22 +62,14 @@ public:
     out << " epoch " << epoch << ")";
   }
 
-  void encode_payload(uint64_t features) {
+  void encode_payload(uint64_t features) override {
     ::encode(epoch, payload);
     ::encode(pg_list, payload, features);
   }
-  void decode_payload() {
+  void decode_payload() override {
     bufferlist::iterator p = payload.begin();
     ::decode(epoch, p);
     ::decode(pg_list, p);
-
-    if (header.version < 2) {
-      for (map<pg_t, pg_query_t>::iterator i = pg_list.begin();
-	   i != pg_list.end();
-	   ++i) {
-	i->second.epoch_sent = epoch;
-      }
-    }
   }
 };
 

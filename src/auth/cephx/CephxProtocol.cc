@@ -25,21 +25,20 @@
 
 
 void cephx_calc_client_server_challenge(CephContext *cct, CryptoKey& secret, uint64_t server_challenge, 
-		  uint64_t client_challenge, uint64_t *key, std::string &ret)
+		  uint64_t client_challenge, uint64_t *key, std::string &error)
 {
   CephXChallengeBlob b;
   b.server_challenge = server_challenge;
   b.client_challenge = client_challenge;
 
   bufferlist enc;
-  std::string error;
   if (encode_encrypt(cct, b, secret, enc, error))
     return;
 
   uint64_t k = 0;
   const uint64_t *p = (const uint64_t *)enc.c_str();
   for (int pos = 0; pos + sizeof(k) <= enc.length(); pos+=sizeof(k), p++)
-    k ^= *p;
+    k ^= mswab(*p);
   *key = k;
 }
 
@@ -61,7 +60,10 @@ bool cephx_build_service_ticket_blob(CephContext *cct, CephXSessionAuthInfo& inf
 	   << " ticket_info.ticket.name=" << ticket_info.ticket.name.to_str() << dendl;
   blob.secret_id = info.secret_id;
   std::string error;
-  encode_encrypt_enc_bl(cct, ticket_info, info.service_secret, blob.blob, error);
+  if (!info.service_secret.get_secret().length())
+    error = "invalid key";  // Bad key?
+  else
+    encode_encrypt_enc_bl(cct, ticket_info, info.service_secret, blob.blob, error);
   if (!error.empty()) {
     ldout(cct, -1) << "cephx_build_service_ticket_blob failed with error "
 	  << error << dendl;
@@ -177,7 +179,7 @@ bool CephXTicketHandler::verify_service_ticket_reply(CryptoKey& secret,
            << " validity=" << msg_a.validity << dendl;
   session_key = msg_a.session_key;
   if (!msg_a.validity.is_zero()) {
-    expires = ceph_clock_now(cct);
+    expires = ceph_clock_now();
     expires += msg_a.validity;
     renew_after = expires;
     renew_after -= ((double)msg_a.validity.sec() / 4);
@@ -191,16 +193,16 @@ bool CephXTicketHandler::verify_service_ticket_reply(CryptoKey& secret,
 bool CephXTicketHandler::have_key()
 {
   if (have_key_flag) {
-    have_key_flag = ceph_clock_now(cct) < expires;
+    have_key_flag = ceph_clock_now() < expires;
   }
 
   return have_key_flag;
 }
 
-bool CephXTicketHandler::need_key()
+bool CephXTicketHandler::need_key() const
 {
   if (have_key_flag) {
-    return (!expires.is_zero()) && (ceph_clock_now(cct) >= renew_after);
+    return (!expires.is_zero()) && (ceph_clock_now() >= renew_after);
   }
 
   return true;
@@ -214,9 +216,9 @@ bool CephXTicketManager::have_key(uint32_t service_id)
   return iter->second.have_key();
 }
 
-bool CephXTicketManager::need_key(uint32_t service_id)
+bool CephXTicketManager::need_key(uint32_t service_id) const
 {
-  map<uint32_t, CephXTicketHandler>::iterator iter = tickets_map.find(service_id);
+  map<uint32_t, CephXTicketHandler>::const_iterator iter = tickets_map.find(service_id);
   if (iter == tickets_map.end())
     return true;
   return iter->second.need_key();
@@ -290,7 +292,7 @@ bool CephXTicketManager::verify_service_ticket_reply(CryptoKey& secret,
  *
  * ticket, {timestamp}^session_key
  */
-CephXAuthorizer *CephXTicketHandler::build_authorizer(uint64_t global_id)
+CephXAuthorizer *CephXTicketHandler::build_authorizer(uint64_t global_id) const
 {
   CephXAuthorizer *a = new CephXAuthorizer(cct);
   a->session_key = session_key;
@@ -320,16 +322,16 @@ CephXAuthorizer *CephXTicketHandler::build_authorizer(uint64_t global_id)
  *
  * ticket, {timestamp}^session_key
  */
-CephXAuthorizer *CephXTicketManager::build_authorizer(uint32_t service_id)
+CephXAuthorizer *CephXTicketManager::build_authorizer(uint32_t service_id) const
 {
-  map<uint32_t, CephXTicketHandler>::iterator iter = tickets_map.find(service_id);
+  map<uint32_t, CephXTicketHandler>::const_iterator iter = tickets_map.find(service_id);
   if (iter == tickets_map.end()) {
     ldout(cct, 0) << "no TicketHandler for service "
 		  << ceph_entity_type_name(service_id) << dendl;
     return NULL;
   }
 
-  CephXTicketHandler& handler = iter->second;
+  const CephXTicketHandler& handler = iter->second;
   return handler.build_authorizer(global_id);
 }
 
@@ -429,7 +431,10 @@ bool cephx_verify_authorizer(CephContext *cct, KeyStore *keys,
     }
   }
   std::string error;
-  decode_decrypt_enc_bl(cct, ticket_info, service_secret, ticket.blob, error);
+  if (!service_secret.get_secret().length())
+    error = "invalid key";  // Bad key?
+  else
+    decode_decrypt_enc_bl(cct, ticket_info, service_secret, ticket.blob, error);
   if (!error.empty()) {
     ldout(cct, 0) << "verify_authorizer could not decrypt ticket info: error: "
       << error << dendl;

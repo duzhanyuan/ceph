@@ -1,9 +1,7 @@
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// vim: ts=8 sw=2 smarttab
 
-#include <iostream>
-
-#include "crush/CrushWrapper.h"
 #include "osd/OSDMap.h"
-#include "common/config.h"
 #include "include/buffer.h"
 
 int main(int argc, char **argv)
@@ -19,20 +17,36 @@ int main(int argc, char **argv)
     return 1;
   }
   OSDMap osdmap;
-  osdmap.decode(bl);
+
+  try {
+    osdmap.decode(bl);
+  } catch (ceph::buffer::end_of_buffer &eob) {
+    cout << "Exception (end_of_buffer) in decode(), exit." << std::endl;
+    exit(1);
+  }
+
+  //osdmap.set_primary_affinity(0, 0x8000);
+  //osdmap.set_primary_affinity(3, 0);
 
   int n = osdmap.get_max_osd();
   int count[n];
+  int first_count[n];
+  int primary_count[n];
+  int size[4];
+
+  memset(count, 0, sizeof(count));
+  memset(first_count, 0, sizeof(first_count));
+  memset(primary_count, 0, sizeof(primary_count));
+  memset(size, 0, sizeof(size));
+
   for (int i=0; i<n; i++) {
     osdmap.set_state(i, osdmap.get_state(i) | CEPH_OSD_UP);
-    //if (i<8)
+    //if (i<12)
       osdmap.set_weight(i, CEPH_OSD_IN);
-    count[i] = 0;
   }
 
-  int size[4];
-  for (int i=0; i<4; i++)
-    size[i] = 0;
+  //pg_pool_t *p = (pg_pool_t *)osdmap.get_pg_pool(0);
+  //p->type = pg_pool_t::TYPE_ERASURE;
 
   for (int n = 0; n < 10; n++) {   // namespaces
     char nspace[20];
@@ -43,11 +57,11 @@ int main(int argc, char **argv)
       snprintf(foo, sizeof(foo), "%d.%d", f, b);
       object_t oid(foo);
       ceph_object_layout l = osdmap.make_object_layout(oid, 0, nspace);
-	//osdmap.file_to_object_layout(oid, g_default_file_layout);
       vector<int> osds;
       pg_t pgid = pg_t(l.ol_pgid);
       //pgid.u.ps = f * 4 + b;
-      osdmap.pg_to_osds(pgid, osds);
+      int primary;
+      osdmap.pg_to_acting_osds(pgid, &osds, &primary);
       size[osds.size()]++;
 #if 0
       if (0) {
@@ -65,13 +79,20 @@ int main(int argc, char **argv)
 	//cout << " rep " << i << " on " << osds[i] << std::endl;
 	count[osds[i]]++;
       }
+      if (osds.size())
+	first_count[osds[0]]++;
+      if (primary >= 0)
+	primary_count[primary]++;
     }
   }
   }
 
   uint64_t avg = 0;
   for (int i=0; i<n; i++) {
-    cout << "osd." << i << "\t" << count[i] << std::endl;
+    cout << "osd." << i << "\t" << count[i]
+	 << "\t" << first_count[i]
+	 << "\t" << primary_count[i]
+	 << std::endl;
     avg += count[i];
   }
   avg /= n;

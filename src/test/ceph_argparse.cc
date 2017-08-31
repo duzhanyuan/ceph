@@ -27,7 +27,7 @@
 class VectorContainer
 {
 public:
-  VectorContainer(const char** arr_) {
+  explicit VectorContainer(const char** arr_) {
     for (const char **a = arr_; *a; ++a) {
       const char *str = (const char*)strdup(*a);
       arr.push_back(str);
@@ -74,7 +74,10 @@ TEST(CephArgParse, SimpleArgParse) {
 
   found_foo = false;
   found_bar = "";
+  bool baz_found = false;
+  std::string found_baz = "";
   VectorContainer foo(FOO);
+  ostringstream err;
   for (std::vector<const char*>::iterator i = foo.arr.begin();
        i != foo.arr.end(); )
   {
@@ -83,11 +86,17 @@ TEST(CephArgParse, SimpleArgParse) {
       }
       else if (ceph_argparse_witharg(foo.arr, i, &found_bar, "--bar", (char*)NULL)) {
       }
+      else if (ceph_argparse_witharg(foo.arr, i, &found_baz, err, "--baz", (char*)NULL)) {
+	ASSERT_NE(string(""), err.str());
+	baz_found = true;
+      }
       else
 	++i;
   }
   ASSERT_EQ(found_foo, true);
   ASSERT_EQ(found_bar, "");
+  ASSERT_EQ(baz_found, true);
+  ASSERT_EQ(found_baz, "");
 
   found_foo = false;
   found_bar = "";
@@ -271,6 +280,30 @@ TEST(CephArgParse, WithDashesAndUnderscores) {
   ASSERT_EQ(found_baz, "");
 }
 
+TEST(CephArgParse, WithFloat) {
+  const char *BAZSTUFF1[] = { "./myprog", "--foo", "50.5", "--bar", "52", NULL };
+
+  VectorContainer bazstuff1(BAZSTUFF1);
+  ostringstream err;
+  float foo;
+  int bar = -1;
+  for (std::vector<const char*>::iterator i = bazstuff1.arr.begin();
+       i != bazstuff1.arr.end(); )
+  {
+    if (ceph_argparse_double_dash(bazstuff1.arr, i)) {
+      break;
+    } else if (ceph_argparse_witharg(bazstuff1.arr, i, &foo, err, "--foo", (char*)NULL)) {
+      ASSERT_EQ(string(""), err.str());
+    } else if (ceph_argparse_witharg(bazstuff1.arr, i, &bar, err, "--bar", (char*)NULL)) {
+      ASSERT_EQ(string(""), err.str());
+    }
+    else {
+      ++i;
+    }
+  }
+  ASSERT_EQ(foo, 50.5);
+  ASSERT_EQ(bar, 52);
+}
 
 TEST(CephArgParse, WithInt) {
   const char *BAZSTUFF1[] = { "./myprog", "--foo", "50", "--bar", "52", NULL };
@@ -286,9 +319,9 @@ TEST(CephArgParse, WithInt) {
   {
     if (ceph_argparse_double_dash(bazstuff1.arr, i)) {
       break;
-    } else if (ceph_argparse_withint(bazstuff1.arr, i, &foo, &err, "--foo", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(bazstuff1.arr, i, &foo, err, "--foo", (char*)NULL)) {
       ASSERT_EQ(string(""), err.str());
-    } else if (ceph_argparse_withint(bazstuff1.arr, i, &bar, &err, "--bar", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(bazstuff1.arr, i, &bar, err, "--bar", (char*)NULL)) {
       ASSERT_EQ(string(""), err.str());
     }
     else {
@@ -306,7 +339,7 @@ TEST(CephArgParse, WithInt) {
   {
     if (ceph_argparse_double_dash(bazstuff2.arr, i)) {
       break;
-    } else if (ceph_argparse_withint(bazstuff2.arr, i, &foo, &err2, "--foo", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(bazstuff2.arr, i, &foo, err2, "--foo", (char*)NULL)) {
       ASSERT_NE(string(""), err2.str());
     }
     else {
@@ -322,9 +355,9 @@ TEST(CephArgParse, WithInt) {
   {
     if (ceph_argparse_double_dash(bazstuff3.arr, i)) {
       break;
-    } else if (ceph_argparse_withint(bazstuff3.arr, i, &foo, &err, "--foo", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(bazstuff3.arr, i, &foo, err, "--foo", (char*)NULL)) {
       ASSERT_EQ(string(""), err.str());
-    } else if (ceph_argparse_withint(bazstuff3.arr, i, &bar, &err, "--bar", (char*)NULL)) {
+    } else if (ceph_argparse_witharg(bazstuff3.arr, i, &bar, err, "--bar", (char*)NULL)) {
       ASSERT_EQ(string(""), err.str());
     }
     else {
@@ -334,3 +367,112 @@ TEST(CephArgParse, WithInt) {
   ASSERT_EQ(foo, 40);
   ASSERT_EQ(bar, -1);
 }
+
+TEST(CephArgParse, env_to_vec) {
+  {
+    std::vector<const char*> args;
+    unsetenv("CEPH_ARGS");
+    unsetenv("WHATEVER");
+    env_to_vec(args);
+    EXPECT_EQ(0u, args.size());
+    env_to_vec(args, "WHATEVER");
+    EXPECT_EQ(0u, args.size());
+    args.push_back("a");
+    setenv("CEPH_ARGS", "b c", 0);
+    env_to_vec(args);
+    EXPECT_EQ(3u, args.size());
+    EXPECT_EQ(string("b"), args[1]);
+    EXPECT_EQ(string("c"), args[2]);
+    setenv("WHATEVER", "d e", 0);
+    env_to_vec(args, "WHATEVER");
+    EXPECT_EQ(5u, args.size());
+    EXPECT_EQ(string("d"), args[3]);
+    EXPECT_EQ(string("e"), args[4]);
+  }
+  {
+    std::vector<const char*> args;
+    unsetenv("CEPH_ARGS");
+    args.push_back("a");
+    args.push_back("--");
+    args.push_back("c");
+    setenv("CEPH_ARGS", "b -- d", 0);
+    env_to_vec(args);
+    EXPECT_EQ(5u, args.size());
+    EXPECT_EQ(string("a"), args[0]);
+    EXPECT_EQ(string("b"), args[1]);
+    EXPECT_EQ(string("--"), args[2]);
+    EXPECT_EQ(string("c"), args[3]);
+    EXPECT_EQ(string("d"), args[4]);
+  }
+  {
+    std::vector<const char*> args;
+    unsetenv("CEPH_ARGS");
+    args.push_back("a");
+    args.push_back("--");
+    setenv("CEPH_ARGS", "b -- c", 0);
+    env_to_vec(args);
+    EXPECT_EQ(4u, args.size());
+    EXPECT_EQ(string("a"), args[0]);
+    EXPECT_EQ(string("b"), args[1]);
+    EXPECT_EQ(string("--"), args[2]);
+    EXPECT_EQ(string("c"), args[3]);
+  }
+  {
+    std::vector<const char*> args;
+    unsetenv("CEPH_ARGS");
+    args.push_back("--");
+    args.push_back("c");
+    setenv("CEPH_ARGS", "b -- d", 0);
+    env_to_vec(args);
+    EXPECT_EQ(4u, args.size());
+    EXPECT_EQ(string("b"), args[0]);
+    EXPECT_EQ(string("--"), args[1]);
+    EXPECT_EQ(string("c"), args[2]);
+    EXPECT_EQ(string("d"), args[3]);
+  }
+  {
+    std::vector<const char*> args;
+    unsetenv("CEPH_ARGS");
+    args.push_back("b");
+    setenv("CEPH_ARGS", "c -- d", 0);
+    env_to_vec(args);
+    EXPECT_EQ(4u, args.size());
+    EXPECT_EQ(string("b"), args[0]);
+    EXPECT_EQ(string("c"), args[1]);
+    EXPECT_EQ(string("--"), args[2]);
+    EXPECT_EQ(string("d"), args[3]);
+  }
+  {
+    std::vector<const char*> args;
+    unsetenv("CEPH_ARGS");
+    args.push_back("a");
+    args.push_back("--");
+    args.push_back("c");
+    setenv("CEPH_ARGS", "-- d", 0);
+    env_to_vec(args);
+    EXPECT_EQ(4u, args.size());
+    EXPECT_EQ(string("a"), args[0]);
+    EXPECT_EQ(string("--"), args[1]);
+    EXPECT_EQ(string("c"), args[2]);
+    EXPECT_EQ(string("d"), args[3]);
+  }
+  {
+    std::vector<const char*> args;
+    unsetenv("CEPH_ARGS");
+    args.push_back("a");
+    args.push_back("--");
+    args.push_back("c");
+    setenv("CEPH_ARGS", "d", 0);
+    env_to_vec(args);
+    EXPECT_EQ(4u, args.size());
+    EXPECT_EQ(string("a"), args[0]);
+    EXPECT_EQ(string("d"), args[1]);
+    EXPECT_EQ(string("--"), args[2]);
+    EXPECT_EQ(string("c"), args[3]);
+  }
+}
+/*
+ * Local Variables:
+ * compile-command: "cd .. ; make unittest_ceph_argparse && ./unittest_ceph_argparse"
+ * End:
+ */

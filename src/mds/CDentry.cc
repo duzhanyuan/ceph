@@ -17,26 +17,24 @@
 #include "CDentry.h"
 #include "CInode.h"
 #include "CDir.h"
-#include "Anchor.h"
 
-#include "MDS.h"
+#include "MDSRank.h"
 #include "MDCache.h"
 #include "Locker.h"
 #include "LogSegment.h"
 
 #include "messages/MLock.h"
 
+#define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_mds
 #undef dout_prefix
 #define dout_prefix *_dout << "mds." << dir->cache->mds->get_nodeid() << ".cache.den(" << dir->dirfrag() << " " << name << ") "
 
 
-ostream& CDentry::print_db_line_prefix(ostream& out) 
+ostream& CDentry::print_db_line_prefix(ostream& out)
 {
-  return out << ceph_clock_now(g_ceph_context) << " mds." << dir->cache->mds->get_nodeid() << ".cache.den(" << dir->ino() << " " << name << ") ";
+  return out << ceph_clock_now() << " mds." << dir->cache->mds->get_nodeid() << ".cache.den(" << dir->ino() << " " << name << ") ";
 }
-
-boost::pool<> CDentry::pool(sizeof(CDentry));
 
 LockType CDentry::lock_type(CEPH_LOCK_DN);
 LockType CDentry::versionlock_type(CEPH_LOCK_DVERSION);
@@ -44,7 +42,7 @@ LockType CDentry::versionlock_type(CEPH_LOCK_DVERSION);
 
 // CDentry
 
-ostream& operator<<(ostream& out, CDentry& dn)
+ostream& operator<<(ostream& out, const CDentry& dn)
 {
   filepath path;
   dn.make_path(path);
@@ -72,16 +70,7 @@ ostream& operator<<(ostream& out, CDentry& dn)
   if (dn.get_linkage()->is_null()) out << " NULL";
   if (dn.get_linkage()->is_remote()) {
     out << " REMOTE(";
-    switch (DTTOIF(dn.get_linkage()->get_remote_d_type())) {
-    case S_IFSOCK: out << "sock"; break;
-    case S_IFLNK: out << "lnk"; break;
-    case S_IFREG: out << "reg"; break;
-    case S_IFBLK: out << "blk"; break;
-    case S_IFDIR: out << "dir"; break;
-    case S_IFCHR: out << "chr"; break;
-    case S_IFIFO: out << "fifo"; break;
-    default: assert(0);
-    }
+    out << dn.get_linkage()->get_remote_d_type_string();
     out << ")";
   }
 
@@ -99,7 +88,9 @@ ostream& operator<<(ostream& out, CDentry& dn)
 
   out << " inode=" << dn.get_linkage()->get_inode();
 
-  if (dn.is_new()) out << " state=new";
+  out << " state=" << dn.get_state();
+  if (dn.is_new()) out << "|new";
+  if (dn.state_test(CDentry::STATE_BOTTOMLRU)) out << "|bottomlru";
 
   if (dn.get_num_ref()) {
     out << " |";
@@ -138,13 +129,13 @@ inodeno_t CDentry::get_ino()
 }
 */
 
-pair<int,int> CDentry::authority()
+mds_authority_t CDentry::authority() const
 {
   return dir->authority();
 }
 
 
-void CDentry::add_waiter(uint64_t tag, Context *c)
+void CDentry::add_waiter(uint64_t tag, MDSInternalContextBase *c)
 {
   // wait on the directory?
   if (tag & (WAIT_UNFREEZE|WAIT_SINGLEAUTH)) {
@@ -214,10 +205,10 @@ void CDentry::mark_new()
   state_set(STATE_NEW);
 }
 
-void CDentry::make_path_string(string& s)
+void CDentry::make_path_string(string& s, bool projected) const
 {
   if (dir) {
-    dir->inode->make_path_string(s);
+    dir->inode->make_path_string(s, projected);
   } else {
     s = "???";
   }
@@ -225,48 +216,12 @@ void CDentry::make_path_string(string& s)
   s.append(name.data(), name.length());
 }
 
-void CDentry::make_path(filepath& fp)
+void CDentry::make_path(filepath& fp, bool projected) const
 {
   assert(dir);
-  if (dir->inode->is_base())
-    fp = filepath(dir->inode->ino());               // base case
-  else if (dir->inode->get_parent_dn())
-    dir->inode->get_parent_dn()->make_path(fp);  // recurse
-  else
-    fp = filepath(dir->inode->ino());               // relative but not base?  hrm!
+  dir->inode->make_path(fp, projected);
   fp.push_dentry(name);
 }
-
-/*
-void CDentry::make_path(string& s, inodeno_t tobase)
-{
-  assert(dir);
-  
-  if (dir->inode->is_root()) {
-    s += "/";  // make it an absolute path (no matter what) if we hit the root.
-  } 
-  else if (dir->inode->get_parent_dn() &&
-	   dir->inode->ino() != tobase) {
-    dir->inode->get_parent_dn()->make_path(s, tobase);
-    s += "/";
-  }
-  s += name;
-}
-*/
-
-/** make_anchor_trace
- * construct an anchor trace for this dentry, as if it were linked to *in.
- */
-void CDentry::make_anchor_trace(vector<Anchor>& trace, CInode *in)
-{
-  // start with parent dir inode
-  dir->inode->make_anchor_trace(trace);
-
-  // add this inode (in my dirfrag) to the end
-  trace.push_back(Anchor(in->ino(), dir->ino(), get_hash(), 0, 0));
-  dout(10) << "make_anchor_trace added " << trace.back() << dendl;
-}
-
 
 /*
  * we only add ourselves to remote_parents when the linkage is
@@ -294,6 +249,18 @@ void CDentry::unlink_remote(CDentry::linkage_t *dnl)
   dnl->inode = 0;
 }
 
+void CDentry::push_projected_linkage()
+{
+  _project_linkage();
+
+  if (is_auth()) {
+    CInode *diri = dir->inode;
+    if (diri->is_stray())
+      diri->mdcache->notify_stray_removed();
+  }
+}
+
+
 void CDentry::push_projected_linkage(CInode *inode)
 {
   // dirty rstat tracking is in the projected plane
@@ -306,6 +273,12 @@ void CDentry::push_projected_linkage(CInode *inode)
 
   if (dirty_rstat)
     inode->mark_dirty_rstat();
+
+  if (is_auth()) {
+    CInode *diri = dir->inode;
+    if (diri->is_stray())
+      diri->mdcache->notify_stray_created();
+  }
 }
 
 CDentry::linkage_t *CDentry::pop_projected_linkage()
@@ -345,7 +318,7 @@ CDentry::linkage_t *CDentry::pop_projected_linkage()
 // ----------------------------
 // auth pins
 
-int CDentry::get_num_dir_auth_pins()
+int CDentry::get_num_dir_auth_pins() const
 {
   assert(!is_projected());
   if (get_linkage()->is_primary())
@@ -353,7 +326,7 @@ int CDentry::get_num_dir_auth_pins()
   return auth_pins;
 }
 
-bool CDentry::can_auth_pin()
+bool CDentry::can_auth_pin() const
 {
   assert(dir);
   return dir->can_auth_pin();
@@ -409,25 +382,15 @@ void CDentry::adjust_nested_auth_pins(int adjustment, int diradj, void *by)
   dir->adjust_nested_auth_pins(adjustment, diradj, by);
 }
 
-bool CDentry::is_frozen()
+bool CDentry::is_frozen() const
 {
   return dir->is_frozen();
 }
 
-bool CDentry::is_freezing()
+bool CDentry::is_freezing() const
 {
   return dir->is_freezing();
 }
-
-
-void CDentry::adjust_nested_anchors(int by)
-{
-  nested_anchors += by;
-  dout(20) << "adjust_nested_anchors by " << by << " -> " << nested_anchors << dendl;
-  assert(nested_anchors >= 0);
-  dir->adjust_nested_anchors(by);
-}
-
 
 void CDentry::decode_replica(bufferlist::iterator& p, bool is_new)
 {
@@ -480,7 +443,7 @@ void CDentry::encode_lock_state(int type, bufferlist& bl)
   else if (linkage.is_null()) {
     // encode nothing.
   }
-  else assert(0);  
+  else ceph_abort();
 }
 
 void CDentry::decode_lock_state(int type, bufferlist& bl)
@@ -521,7 +484,7 @@ void CDentry::decode_lock_state(int type, bufferlist& bl)
     }
     break;
   default: 
-    assert(0);
+    ceph_abort();
   }
 }
 
@@ -567,14 +530,93 @@ void CDentry::remove_client_lease(ClientLease *l, Locker *locker)
     locker->eval_gather(&lock);
 }
 
+void CDentry::remove_client_leases(Locker *locker)
+{
+  while (!client_lease_map.empty())
+    remove_client_lease(client_lease_map.begin()->second, locker);
+}
+
 void CDentry::_put()
 {
-  if (get_num_ref() <= (int)is_dirty() + 1) {
+  if (get_num_ref() <= ((int)is_dirty() + 1)) {
     CDentry::linkage_t *dnl = get_projected_linkage();
     if (dnl->is_primary()) {
       CInode *in = dnl->get_inode();
       if (get_num_ref() == (int)is_dirty() + !!in->get_num_ref())
 	in->mdcache->maybe_eval_stray(in, true);
     }
+  }
+}
+
+void CDentry::dump(Formatter *f) const
+{
+  assert(f != NULL);
+
+  filepath path;
+  make_path(path);
+
+  f->dump_string("path", path.get_path());
+  f->dump_unsigned("path_ino", path.get_ino().val);
+  f->dump_unsigned("snap_first", first);
+  f->dump_unsigned("snap_last", last);
+  
+  f->dump_bool("is_primary", get_linkage()->is_primary());
+  f->dump_bool("is_remote", get_linkage()->is_remote());
+  f->dump_bool("is_null", get_linkage()->is_null());
+  f->dump_bool("is_new", is_new());
+  if (get_linkage()->get_inode()) {
+    f->dump_unsigned("inode", get_linkage()->get_inode()->ino());
+  } else {
+    f->dump_unsigned("inode", 0);
+  }
+
+  if (linkage.is_remote()) {
+    f->dump_string("remote_type", linkage.get_remote_d_type_string());
+  } else {
+    f->dump_string("remote_type", "");
+  }
+
+  f->dump_unsigned("version", get_version());
+  f->dump_unsigned("projected_version", get_projected_version());
+
+  f->dump_int("auth_pins", auth_pins);
+  f->dump_int("nested_auth_pins", nested_auth_pins);
+
+  MDSCacheObject::dump(f);
+
+  f->open_object_section("lock");
+  lock.dump(f);
+  f->close_section();
+
+  f->open_object_section("versionlock");
+  versionlock.dump(f);
+  f->close_section();
+
+  f->open_array_section("states");
+  MDSCacheObject::dump_states(f);
+  if (state_test(STATE_NEW))
+    f->dump_string("state", "new");
+  if (state_test(STATE_FRAGMENTING))
+    f->dump_string("state", "fragmenting");
+  if (state_test(STATE_PURGING))
+    f->dump_string("state", "purging");
+  if (state_test(STATE_BADREMOTEINO))
+    f->dump_string("state", "badremoteino");
+  if (state_test(STATE_STRAY))
+    f->dump_string("state", "stray");
+  f->close_section();
+}
+
+std::string CDentry::linkage_t::get_remote_d_type_string() const
+{
+  switch (DTTOIF(remote_d_type)) {
+    case S_IFSOCK: return "sock";
+    case S_IFLNK: return "lnk";
+    case S_IFREG: return "reg";
+    case S_IFBLK: return "blk";
+    case S_IFDIR: return "dir";
+    case S_IFCHR: return "chr";
+    case S_IFIFO: return "fifo";
+    default: ceph_abort(); return "";
   }
 }

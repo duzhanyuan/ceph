@@ -17,7 +17,6 @@
 
 #include <map>
 #include <string>
-#include <iostream>
 #include <include/types.h>
 
 #define RGW_CORS_GET    0x1
@@ -41,7 +40,8 @@ protected:
   uint32_t       max_age;
   uint8_t        allowed_methods;
   std::string         id;
-  std::set<string> allowed_hdrs;
+  std::set<string> allowed_hdrs; /* If you change this, you need to discard lowercase_allowed_hdrs */
+  std::set<string> lowercase_allowed_hdrs; /* Not built until needed in RGWCORSRule::is_header_allowed */
   std::set<string> allowed_origins;
   std::list<string> exposable_hdrs;
 
@@ -80,6 +80,7 @@ public:
     ::decode(exposable_hdrs, bl);
     DECODE_FINISH(bl);
   }
+  bool has_wildcard_origin();
   bool is_origin_present(const char *o);
   void format_exp_headers(std::string& s);
   void erase_origin_if_present(std::string& origin, bool *rule_empty);

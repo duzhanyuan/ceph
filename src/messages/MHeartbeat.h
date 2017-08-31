@@ -22,13 +22,13 @@
 class MHeartbeat : public Message {
   mds_load_t load;
   __s32        beat;
-  map<__s32, float> import_map;
+  map<mds_rank_t, float> import_map;
 
  public:
   mds_load_t& get_load() { return load; }
   int get_beat() { return beat; }
 
-  map<__s32, float>& get_import_map() {
+  map<mds_rank_t, float>& get_import_map() {
     return import_map;
   }
 
@@ -40,19 +40,19 @@ class MHeartbeat : public Message {
     this->beat = beat;
   }
 private:
-  ~MHeartbeat() {}
+  ~MHeartbeat() override {}
 
 public:
-  const char *get_type_name() const { return "HB"; }
+  const char *get_type_name() const override { return "HB"; }
 
-  void encode_payload(uint64_t features) {
+  void encode_payload(uint64_t features) override {
     ::encode(load, payload);
     ::encode(beat, payload);
     ::encode(import_map, payload);
   }
-  void decode_payload() {
+  void decode_payload() override {
     bufferlist::iterator p = payload.begin();
-    utime_t now(ceph_clock_now(NULL));
+    utime_t now(ceph_clock_now());
     ::decode(load, now, p);
     ::decode(beat, p);
     ::decode(import_map, p);

@@ -23,19 +23,16 @@
  * stuff to live.
  */
 
-#include <deque>
-#include <stdint.h>
 #include <string>
 #include <vector>
 
 #include "common/entity_name.h"
-#include "msg/msg_types.h"
 
 /////////////////////// Types ///////////////////////
 class CephInitParameters
 {
 public:
-  CephInitParameters(uint32_t module_type_);
+  explicit CephInitParameters(uint32_t module_type_);
   std::list<std::string> get_conf_files() const;
 
   uint32_t module_type;
@@ -56,27 +53,20 @@ bool ceph_argparse_double_dash(std::vector<const char*> &args,
 bool ceph_argparse_flag(std::vector<const char*> &args,
 	std::vector<const char*>::iterator &i, ...);
 bool ceph_argparse_witharg(std::vector<const char*> &args,
+	std::vector<const char*>::iterator &i, std::string *ret,
+	std::ostream &oss, ...);
+bool ceph_argparse_witharg(std::vector<const char*> &args,
 	std::vector<const char*>::iterator &i, std::string *ret, ...);
-bool ceph_argparse_witharg_daemon(std::vector<const char*> &args,
-	std::vector<const char*>::iterator &i, std::string *ret, ...);
+template<class T>
+bool ceph_argparse_witharg(std::vector<const char*> &args,
+	std::vector<const char*>::iterator &i, T *ret,
+	std::ostream &oss, ...);
 bool ceph_argparse_binary_flag(std::vector<const char*> &args,
 	std::vector<const char*>::iterator &i, int *ret,
 	std::ostream *oss, ...);
 extern CephInitParameters ceph_argparse_early_args
-	    (std::vector<const char*>& args, uint32_t module_type, int flags,
+	    (std::vector<const char*>& args, uint32_t module_type,
 	     std::string *cluster, std::string *conf_file_list);
-extern bool ceph_argparse_withint(std::vector<const char*> &args,
-	std::vector<const char*>::iterator &i, int *ret,
-	std::ostream *oss, ...);
-extern bool ceph_argparse_withint_daemon(std::vector<const char*> &args,
-	std::vector<const char*>::iterator &i, int *ret,
-	std::ostream *oss, ...);
-extern bool ceph_argparse_withfloat(std::vector<const char*> &args,
-	std::vector<const char*>::iterator &i, float *ret,
-	std::ostream *oss, ...);
-extern bool ceph_argparse_withlonglong(std::vector<const char*> &args,
-	std::vector<const char*>::iterator &i, long long *ret,
-	std::ostream *oss, ...);
 extern void generic_server_usage();
 extern void generic_client_usage();
 

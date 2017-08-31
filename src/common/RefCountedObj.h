@@ -17,23 +17,59 @@
  
 #include "common/Mutex.h"
 #include "common/Cond.h"
-#include "include/atomic.h"
+#include "common/ceph_context.h"
+#include "common/valgrind.h"
 
+// re-include our assert to clobber the system one; fix dout:
+#include "include/assert.h"
 
 struct RefCountedObject {
-  atomic_t nref;
-  RefCountedObject() : nref(1) {}
-  virtual ~RefCountedObject() {}
+private:
+  mutable std::atomic<uint64_t> nref;
+  CephContext *cct;
+public:
+  RefCountedObject(CephContext *c = NULL, int n=1) : nref(n), cct(c) {}
+  virtual ~RefCountedObject() {
+    assert(nref == 0);
+  }
   
-  RefCountedObject *get() {
-    //generic_dout(0) << "RefCountedObject::get " << this << " " << nref.read() << " -> " << (nref.read() + 1) << dendl;
-    nref.inc();
+  const RefCountedObject *get() const {
+    int v = ++nref;
+    if (cct)
+      lsubdout(cct, refs, 1) << "RefCountedObject::get " << this << " "
+			     << (v - 1) << " -> " << v
+			     << dendl;
     return this;
   }
-  void put() {
-    //generic_dout(0) << "RefCountedObject::put " << this << " " << nref.read() << " -> " << (nref.read() - 1) << dendl;
-    if (nref.dec() == 0)
+  RefCountedObject *get() {
+    int v = ++nref;
+    if (cct)
+      lsubdout(cct, refs, 1) << "RefCountedObject::get " << this << " "
+			     << (v - 1) << " -> " << v
+			     << dendl;
+    return this;
+  }
+  void put() const {
+    CephContext *local_cct = cct;
+    int v = --nref;
+    if (v == 0) {
+      ANNOTATE_HAPPENS_AFTER(&nref);
+      ANNOTATE_HAPPENS_BEFORE_FORGET_ALL(&nref);
       delete this;
+    } else {
+      ANNOTATE_HAPPENS_BEFORE(&nref);
+    }
+    if (local_cct)
+      lsubdout(local_cct, refs, 1) << "RefCountedObject::put " << this << " "
+				   << (v + 1) << " -> " << v
+				   << dendl;
+  }
+  void set_cct(CephContext *c) {
+    cct = c;
+  }
+
+  uint64_t get_nref() const {
+    return nref;
   }
 };
 
@@ -83,10 +119,10 @@ struct RefCountedCond : public RefCountedObject {
  *    
  */
 struct RefCountedWaitObject {
-  atomic_t nref;
+  std::atomic<uint64_t> nref = { 1 };
   RefCountedCond *c;
 
-  RefCountedWaitObject() : nref(1) {
+  RefCountedWaitObject() {
     c = new RefCountedCond;
   }
   virtual ~RefCountedWaitObject() {
@@ -94,7 +130,7 @@ struct RefCountedWaitObject {
   }
 
   RefCountedWaitObject *get() {
-    nref.inc();
+    nref++;
     return this;
   }
 
@@ -102,7 +138,7 @@ struct RefCountedWaitObject {
     bool ret = false;
     RefCountedCond *cond = c;
     cond->get();
-    if (nref.dec() == 0) {
+    if (--nref == 0) {
       cond->done();
       delete this;
       ret = true;
@@ -115,7 +151,7 @@ struct RefCountedWaitObject {
     RefCountedCond *cond = c;
 
     cond->get();
-    if (nref.dec() == 0) {
+    if (--nref == 0) {
       cond->done();
       delete this;
     } else {
@@ -125,7 +161,7 @@ struct RefCountedWaitObject {
   }
 };
 
-void intrusive_ptr_add_ref(RefCountedObject *p);
-void intrusive_ptr_release(RefCountedObject *p);
+void intrusive_ptr_add_ref(const RefCountedObject *p);
+void intrusive_ptr_release(const RefCountedObject *p);
 
 #endif

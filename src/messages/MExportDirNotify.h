@@ -16,8 +16,6 @@
 #define CEPH_MEXPORTDIRNOTIFY_H
 
 #include "msg/Message.h"
-#include <string>
-using namespace std;
 
 class MExportDirNotify : public Message {
   dirfrag_t base;
@@ -33,15 +31,17 @@ class MExportDirNotify : public Message {
   list<dirfrag_t>& get_bounds() { return bounds; }
 
   MExportDirNotify() {}
-  MExportDirNotify(dirfrag_t i, bool a, pair<__s32,__s32> oa, pair<__s32,__s32> na) :
+  MExportDirNotify(dirfrag_t i, uint64_t tid, bool a, pair<__s32,__s32> oa, pair<__s32,__s32> na) :
     Message(MSG_MDS_EXPORTDIRNOTIFY),
-    base(i), ack(a), old_auth(oa), new_auth(na) { }
+    base(i), ack(a), old_auth(oa), new_auth(na) {
+    set_tid(tid);
+  }
 private:
-  ~MExportDirNotify() {}
+  ~MExportDirNotify() override {}
 
 public:
-  const char *get_type_name() const { return "ExNot"; }
-  void print(ostream& o) const {
+  const char *get_type_name() const override { return "ExNot"; }
+  void print(ostream& o) const override {
     o << "export_notify(" << base;
     o << " " << old_auth << " -> " << new_auth;
     if (ack) 
@@ -59,14 +59,14 @@ public:
       bounds.push_back(*i);
   }
 
-  void encode_payload(uint64_t features) {
+  void encode_payload(uint64_t features) override {
     ::encode(base, payload);
     ::encode(ack, payload);
     ::encode(old_auth, payload);
     ::encode(new_auth, payload);
     ::encode(bounds, payload);
   }
-  void decode_payload() {
+  void decode_payload() override {
     bufferlist::iterator p = payload.begin();
     ::decode(base, p);
     ::decode(ack, p);

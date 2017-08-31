@@ -56,9 +56,10 @@ TEST(EscapeXml, Utf8) {
 
 static std::string escape_json_attrs(const char *str)
 {
-  int len = escape_json_attr_len(str);
+  int src_len = strlen(str);
+  int len = escape_json_attr_len(str, src_len);
   char out[len];
-  escape_json_attr(str, out);
+  escape_json_attr(str, src_len, out);
   return out;
 }
 
@@ -72,9 +73,6 @@ TEST(EscapeJson, Escapes1) {
   ASSERT_EQ(escape_json_attrs("The \"scare quotes\""),
 			     "The \\\"scare quotes\\\"");
   ASSERT_EQ(escape_json_attrs("I <3 JSON"), "I <3 JSON");
-  ASSERT_EQ(escape_json_attrs(
-      "JSON calls a slash / backslash a solidus / reverse solidus"),
-      "JSON calls a slash \\/ backslash a solidus \\/ reverse solidus");
   ASSERT_EQ(escape_json_attrs("Some 'single' \"quotes\" here"),
       "Some 'single' \\\"quotes\\\" here");
   ASSERT_EQ(escape_json_attrs("tabs\tand\tnewlines\n, oh my"),

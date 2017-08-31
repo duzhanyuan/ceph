@@ -15,27 +15,27 @@
 #ifndef CEPH_AUTHNONECLIENTHANDLER_H
 #define CEPH_AUTHNONECLIENTHANDLER_H
 
-#include "../AuthClientHandler.h"
+#include "auth/AuthClientHandler.h"
 #include "AuthNoneProtocol.h"
-
-class CephContext;
-
+#include "common/ceph_context.h"
+#include "common/config.h"
+ 
 class AuthNoneClientHandler : public AuthClientHandler {
 public:
   AuthNoneClientHandler(CephContext *cct_, RotatingKeyRing *rkeys) 
     : AuthClientHandler(cct_) {}
 
-  void reset() { }
+  void reset() override { }
 
-  int build_request(bufferlist& bl) { return 0; }
-  int handle_response(int ret, bufferlist::iterator& iter) { return 0; }
-  bool build_rotating_request(bufferlist& bl) { return false; }
+  void prepare_build_request() override {}
+  int build_request(bufferlist& bl) const override { return 0; }
+  int handle_response(int ret, bufferlist::iterator& iter) override { return 0; }
+  bool build_rotating_request(bufferlist& bl) const override { return false; }
 
-  int get_protocol() { return CEPH_AUTH_NONE; }
+  int get_protocol() const override { return CEPH_AUTH_NONE; }
   
-  void tick() {}
-
-  AuthAuthorizer *build_authorizer(uint32_t service_id) {
+  AuthAuthorizer *build_authorizer(uint32_t service_id) const override {
+    RWLock::RLocker l(lock);
     AuthNoneAuthorizer *auth = new AuthNoneAuthorizer();
     if (auth) {
       auth->build_authorizer(cct->_conf->name, global_id);
@@ -43,10 +43,14 @@ public:
     return auth;
   }
 
-  void validate_tickets() { }
-  bool need_tickets() { return false; }
+  bool need_tickets() override { return false; }
 
-  void set_global_id(uint64_t id) { global_id = id; }
+  void set_global_id(uint64_t id) override {
+    RWLock::WLocker l(lock);
+    global_id = id;
+  }
+private:
+  void validate_tickets() override {}
 };
 
 #endif

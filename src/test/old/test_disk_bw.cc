@@ -19,7 +19,7 @@ using namespace std;
 int main(int argc, char **argv)
 {
   void   *buf;
-  int     fd, count, loop = 0, ret;
+  int     fd, count, loop = 0;
   
   if (argc != 4) {
     fprintf(stderr, "Usage: %s device bsize count\n", argv[0]);
@@ -39,9 +39,9 @@ int main(int argc, char **argv)
   }
   
  
-  utime_t start = ceph_clock_now(g_ceph_context);
+  utime_t start = ceph_clock_now();
   while (loop++ < count) {
-    ret = safe_write(fd, buf, bsize);
+    int ret = safe_write(fd, buf, bsize);
     if (ret)
       ceph_abort();
     //if ((loop % 100) == 0) 
@@ -49,7 +49,7 @@ int main(int argc, char **argv)
   }
   ::fsync(fd);
   ::close(fd);
-  utime_t end = ceph_clock_now(g_ceph_context);
+  utime_t end = ceph_clock_now();
   end -= start;
 
 

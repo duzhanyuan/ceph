@@ -18,7 +18,6 @@
 #include "/usr/include/asm-generic/errno.h"
 #include "/usr/include/asm-generic/errno-base.h"
 #include "common/ceph_context.h"
-#include "global/global_context.h"
 #include "common/Clock.h"
 #include "include/types.h"
 
@@ -61,7 +60,7 @@ void IndexCache::push(const string &key, const index_data &idata) {
     utime_t old_time = new_it->second.second;
     t2kmap.erase(old_time);
   }
-  utime_t time = ceph_clock_now(g_ceph_context);
+  utime_t time = ceph_clock_now();
   k2itmap[idata.kdata] = make_pair(idata, time);
   t2kmap[time] = idata.kdata;
   if ((int)k2itmap.size() > cache_size) {
@@ -79,7 +78,7 @@ void IndexCache::push(const index_data &idata) {
     t2kmap.erase(old_time);
     k2itmap.erase(idata.kdata);
   }
-  utime_t time = ceph_clock_now(g_ceph_context);
+  utime_t time = ceph_clock_now();
   k2itmap[idata.kdata] = make_pair(idata, time);
   t2kmap[time] = idata.kdata;
   if ((int)k2itmap.size() > cache_size) {
@@ -178,7 +177,7 @@ int KvFlatBtreeAsync::next(const index_data &idata, index_data * out_data)
   int err = 0;
   librados::ObjectReadOperation oro;
   std::map<std::string, bufferlist> kvs;
-  oro.omap_get_vals(idata.kdata.encoded(),1,&kvs,&err);
+  oro.omap_get_vals2(idata.kdata.encoded(),1,&kvs, nullptr, &err);
   err = io_ctx.operate(index_name, &oro, NULL);
   if (err < 0){
     if (verbose) cout << "\t\t\t" << client_name
@@ -190,7 +189,7 @@ int KvFlatBtreeAsync::next(const index_data &idata, index_data * out_data)
     out_data->kdata.parse(kvs.begin()->first);
     bufferlist::iterator b = kvs.begin()->second.begin();
     out_data->decode(b);
-    if (idata.is_timed_out(ceph_clock_now(g_ceph_context),timeout)) {
+    if (idata.is_timed_out(ceph_clock_now(), timeout)) {
       if (verbose) cout << client_name << " THINKS THE OTHER CLIENT DIED."
 	  << std::endl;
       //the client died after deleting the object. clean up.
@@ -217,7 +216,7 @@ int KvFlatBtreeAsync::prev(const index_data &idata, index_data * out_data)
     if (verbose) cout << "\t\t\t" << client_name
 	<< "-prev: getting index failed with error "
 	<< err << std::endl;
-    if (idata.is_timed_out(ceph_clock_now(g_ceph_context),timeout)) {
+    if (idata.is_timed_out(ceph_clock_now(), timeout)) {
       if (verbose) cout << client_name << " THINKS THE OTHER CLIENT DIED."
 	  << std::endl;
       //the client died after deleting the object. clean up.
@@ -272,11 +271,11 @@ int KvFlatBtreeAsync::read_index(const string &key, index_data * idata,
   std::map<std::string, bufferlist> kvmap;
   std::map<std::string, bufferlist> dupmap;
   oro.omap_get_vals_by_keys(key_set, &dupmap, &err);
-  oro.omap_get_vals(key_data(key).encoded(),
+  oro.omap_get_vals2(key_data(key).encoded(),
       (cache_size / cache_refresh >= 2? cache_size / cache_refresh: 2),
-      &kvmap,&err);
+      &kvmap, nullptr, &err);
   err = io_ctx.operate(index_name, &oro, NULL);
-  utime_t mytime = ceph_clock_now(g_ceph_context);
+  utime_t mytime = ceph_clock_now();
   if (err < 0){
     cerr << "\t" << client_name
 	<< "-read_index: getting keys failed with "
@@ -661,7 +660,7 @@ int KvFlatBtreeAsync::read_object(const string &obj, object_data * odata) {
   int err;
   bufferlist unw_bl;
   odata->name = obj;
-  get_obj.omap_get_vals("", LONG_MAX, &odata->omap, &err);
+  get_obj.omap_get_vals2("", LONG_MAX, &odata->omap, nullptr, &err);
   get_obj.getxattr("unwritable", &unw_bl, &err);
   io_ctx.aio_operate(obj, obj_aioc, &get_obj, NULL);
   obj_aioc->wait_for_safe();
@@ -672,7 +671,7 @@ int KvFlatBtreeAsync::read_object(const string &obj, object_data * odata) {
     return err;
   }
   odata->unwritable = string(unw_bl.c_str(), unw_bl.length()) == "1";
-  odata->version = obj_aioc->get_version();
+  odata->version = obj_aioc->get_version64();
   odata->size = odata->omap.size();
   obj_aioc->release();
   return 0;
@@ -697,7 +696,7 @@ int KvFlatBtreeAsync::read_object(const string &obj, rebalance_args * args) {
   bufferlist::iterator it = outbl.begin();
   args->decode(it);
   args->odata.name = obj;
-  args->odata.version = a->get_version();
+  args->odata.version = a->get_version64();
   a->release();
   return err;
 }
@@ -711,7 +710,7 @@ void KvFlatBtreeAsync::set_up_prefix_index(
   std::map<std::string, pair<bufferlist, int> > assertions;
   map<string, bufferlist> to_insert;
   idata->prefix = "1";
-  idata->ts = ceph_clock_now(g_ceph_context);
+  idata->ts = ceph_clock_now();
   for(vector<object_data>::const_iterator it = to_create.begin();
       it != to_create.end();
       ++it) {
@@ -1120,7 +1119,7 @@ int KvFlatBtreeAsync::cleanup(const index_data &idata, const int &error) {
     //all changes were created except for updating the index and possibly
     //deleting the objects. roll forward.
     vector<pair<pair<int, string>, librados::ObjectWriteOperation*> > ops;
-    librados::ObjectWriteOperation owos[idata.to_delete.size() + 1];
+    vector<librados::ObjectWriteOperation> owos(idata.to_delete.size() + 1);
     for (int i = 0; i <= (int)idata.to_delete.size(); ++i) {
       ops.push_back(make_pair(pair<int, string>(0, ""), &owos[i]));
     }
@@ -1475,7 +1474,6 @@ int KvFlatBtreeAsync::set_op(const string &key, const bufferlist &val,
 	return err;
       }
       return set_op(key, val, update_on_existing, idata);
-      break;
     }
     default:
       if (verbose) cerr << "\t" << client_name << ": writing obj failed with "
@@ -1683,7 +1681,7 @@ int KvFlatBtreeAsync::get(const string &key, bufferlist *val) {
     return -ESUICIDE;
   }
   err = read_index(key, &idata, NULL, false);
-  mytime = ceph_clock_now(g_ceph_context);
+  mytime = ceph_clock_now();
   if (err < 0) {
     if (verbose) cout << "getting oid failed with code " << err << std::endl;
     return err;
@@ -1884,7 +1882,7 @@ int KvFlatBtreeAsync::set_many(const map<string, bufferlist> &in_map) {
 	                         .omap.rbegin()->first);
 
       to_create.push_back(object_data(
-    	to_string(client_name, client_index++)));
+	to_string(client_name, client_index++)));
       to_create[to_create.size() - 1].min_kdata =
 	  to_create[to_create.size() - 2].max_kdata;
     }
@@ -1894,8 +1892,8 @@ int KvFlatBtreeAsync::set_many(const map<string, bufferlist> &in_map) {
   to_create[to_create.size() - 1].max_kdata =
       to_delete[to_delete.size() - 1].max_kdata;
 
-  librados::ObjectWriteOperation owos[2 + 2 * to_delete.size()
-                                      + to_create.size()];
+  vector<librados::ObjectWriteOperation> owos(2 + 2 * to_delete.size()
+					      + to_create.size());
   vector<pair<pair<int, string>, librados::ObjectWriteOperation*> > ops;
 
 
@@ -1945,7 +1943,7 @@ int KvFlatBtreeAsync::remove_all() {
   librados::ObjectReadOperation oro;
   librados::AioCompletion * oro_aioc = rados.aio_create_completion();
   std::map<std::string, bufferlist> index_set;
-  oro.omap_get_vals("",LONG_MAX,&index_set,&err);
+  oro.omap_get_vals2("",LONG_MAX,&index_set, nullptr, &err);
   err = io_ctx.aio_operate(index_name, oro_aioc, &oro, NULL);
   if (err < 0){
     if (err == -ENOENT) {
@@ -1998,7 +1996,7 @@ int KvFlatBtreeAsync::get_all_keys(std::set<std::string> *keys) {
   int err = 0;
   librados::ObjectReadOperation oro;
   std::map<std::string,bufferlist> index_set;
-  oro.omap_get_vals("",LONG_MAX,&index_set,&err);
+  oro.omap_get_vals2("",LONG_MAX,&index_set, nullptr, &err);
   io_ctx.operate(index_name, &oro, NULL);
   if (err < 0){
     if (verbose) cout << "getting keys failed with error " << err << std::endl;
@@ -2008,7 +2006,7 @@ int KvFlatBtreeAsync::get_all_keys(std::set<std::string> *keys) {
       it != index_set.end(); ++it){
     librados::ObjectReadOperation sub;
     std::set<std::string> ret;
-    sub.omap_get_keys("",LONG_MAX,&ret,&err);
+    sub.omap_get_keys2("",LONG_MAX,&ret, nullptr, &err);
     index_data idata;
     bufferlist::iterator b = it->second.begin();
     idata.decode(b);
@@ -2025,7 +2023,7 @@ int KvFlatBtreeAsync::get_all_keys_and_values(
   int err = 0;
   librados::ObjectReadOperation first_read;
   std::set<std::string> index_set;
-  first_read.omap_get_keys("",LONG_MAX,&index_set,&err);
+  first_read.omap_get_keys2("",LONG_MAX,&index_set, nullptr, &err);
   io_ctx.operate(index_name, &first_read, NULL);
   if (err < 0){
     if (verbose) cout << "getting keys failed with error " << err << std::endl;
@@ -2035,7 +2033,7 @@ int KvFlatBtreeAsync::get_all_keys_and_values(
       it != index_set.end(); ++it){
     librados::ObjectReadOperation sub;
     map<std::string, bufferlist> ret;
-    sub.omap_get_vals("",LONG_MAX,&ret,&err);
+    sub.omap_get_vals2("",LONG_MAX,&ret, nullptr, &err);
     io_ctx.operate(*it, &sub, NULL);
     kv_map->insert(ret.begin(), ret.end());
   }
@@ -2049,14 +2047,14 @@ bool KvFlatBtreeAsync::is_consistent() {
   std::map<std::string,bufferlist> index;
   map<std::string, std::set<std::string> > sub_objs;
   librados::ObjectReadOperation oro;
-  oro.omap_get_vals("",LONG_MAX,&index,&err);
+  oro.omap_get_vals2("",LONG_MAX,&index, nullptr, &err);
   io_ctx.operate(index_name, &oro, NULL);
   if (err < 0){
     //probably because the index doesn't exist - this might be ok.
-    for (librados::ObjectIterator oit = io_ctx.objects_begin();
-        oit != io_ctx.objects_end(); ++oit) {
+    for (librados::NObjectIterator oit = io_ctx.nobjects_begin();
+        oit != io_ctx.nobjects_end(); ++oit) {
       //if this executes, there are floating objects.
-      cerr << "Not consistent! found floating object " << oit->first
+      cerr << "Not consistent! found floating object " << oit->get_oid()
              << std::endl;
       ret = false;
     }
@@ -2082,7 +2080,7 @@ bool KvFlatBtreeAsync::is_consistent() {
 	  io_ctx.aio_operate(dit->obj, aioc, &oro, NULL);
 	  aioc->wait_for_safe();
 	  err = aioc->get_return_value();
-	  if (ceph_clock_now(g_ceph_context) - idata.ts > timeout) {
+	  if (ceph_clock_now() - idata.ts > timeout) {
 	    if (err < 0) {
 	      aioc->release();
 	      if (err == -ENOENT) {
@@ -2095,7 +2093,7 @@ bool KvFlatBtreeAsync::is_consistent() {
 	      }
 	    }
 	    if (atoi(string(un.c_str(), un.length()).c_str()) != 1 &&
-		aioc->get_version() != (int)dit->version) {
+		aioc->get_version64() != dit->version) {
 	      cerr << "Not consistent! object " << dit->obj << " has been "
 		  << " modified since the client died was not cleaned up."
 		  << std::endl;
@@ -2117,9 +2115,9 @@ bool KvFlatBtreeAsync::is_consistent() {
 
   //make sure that an object exists iff it either is the index
   //or is listed in the index
-  for (librados::ObjectIterator oit = io_ctx.objects_begin();
-      oit != io_ctx.objects_end(); ++oit) {
-    string name = oit->first;
+  for (librados::NObjectIterator oit = io_ctx.nobjects_begin();
+      oit != io_ctx.nobjects_end(); ++oit) {
+    string name = oit->get_oid();
     if (name != index_name && onames.count(name) == 0
 	&& special_names.count(name) == 0) {
       cerr << "Not consistent! found floating object " << name << std::endl;
@@ -2133,7 +2131,7 @@ bool KvFlatBtreeAsync::is_consistent() {
       it != parsed_index.end();
       ++it) {
     librados::ObjectReadOperation read;
-    read.omap_get_keys("", LONG_MAX, &sub_objs[it->second], &err);
+    read.omap_get_keys2("", LONG_MAX, &sub_objs[it->second], nullptr, &err);
     err = io_ctx.operate(it->second, &read, NULL);
     int size_int = (int)sub_objs[it->second].size();
 
@@ -2186,7 +2184,7 @@ string KvFlatBtreeAsync::str() {
   std::map<std::string,bufferlist> index;
   librados::ObjectReadOperation oro;
   librados::AioCompletion * top_aioc = rados.aio_create_completion();
-  oro.omap_get_vals("",LONG_MAX,&index,&err);
+  oro.omap_get_vals2("",LONG_MAX,&index, nullptr, &err);
   io_ctx.aio_operate(index_name, top_aioc, &oro, NULL);
   top_aioc->wait_for_safe();
   err = top_aioc->get_return_value();
@@ -2242,7 +2240,7 @@ string KvFlatBtreeAsync::str() {
       ++it) {
     librados::ObjectReadOperation oro;
     librados::AioCompletion *aioc = rados.aio_create_completion();
-    oro.omap_get_vals("", LONG_MAX, &all_maps[indexer], &err);
+    oro.omap_get_vals2("", LONG_MAX, &all_maps[indexer], nullptr, &err);
     oro.getxattr("unwritable", &all_unwrit[indexer], &err);
     io_ctx.aio_operate(*it, aioc, &oro, NULL);
     aioc->wait_for_safe();
@@ -2251,7 +2249,7 @@ string KvFlatBtreeAsync::str() {
       //return ret.str();
     }
     all_sizes[indexer] = all_maps[indexer].size();
-    all_versions[indexer] = aioc->get_version();
+    all_versions[indexer] = aioc->get_version64();
     indexer++;
     aioc->release();
   }

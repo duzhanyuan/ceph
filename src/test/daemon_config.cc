@@ -12,28 +12,32 @@
  *
  */
 
+#include "gtest/gtest.h"
 #include "common/ceph_argparse.h"
 #include "common/config.h"
+#include "global/global_context.h"
 #include "include/cephfs/libcephfs.h"
 #include "include/rados/librados.h"
-#include "test/unit.h"
 
 #include <errno.h>
 #include <sstream>
 #include <string>
 #include <string.h>
 
+#include <boost/lexical_cast.hpp>
+
+
 using std::string;
 
 TEST(DaemonConfig, SimpleSet) {
   int ret;
-  ret = g_ceph_context->_conf->set_val("num_client", "21");
+  ret = g_ceph_context->_conf->set_val("log_graylog_port", "21");
   ASSERT_EQ(ret, 0);
   g_ceph_context->_conf->apply_changes(NULL);
   char buf[128];
   memset(buf, 0, sizeof(buf));
   char *tmp = buf;
-  ret = g_ceph_context->_conf->get_val("num_client", &tmp, sizeof(buf));
+  ret = g_ceph_context->_conf->get_val("log_graylog_port", &tmp, sizeof(buf));
   ASSERT_EQ(ret, 0);
   ASSERT_EQ(string("21"), string(buf));
 }
@@ -41,6 +45,7 @@ TEST(DaemonConfig, SimpleSet) {
 TEST(DaemonConfig, Substitution) {
   int ret;
   ret = g_ceph_context->_conf->set_val("internal_safe_to_start_threads", "false");
+  ASSERT_EQ(ret, 0);
   ret = g_ceph_context->_conf->set_val("host", "foo");
   ASSERT_EQ(ret, 0);
   ret = g_ceph_context->_conf->set_val("public_network", "bar$host.baz", false);
@@ -57,6 +62,7 @@ TEST(DaemonConfig, Substitution) {
 TEST(DaemonConfig, SubstitutionTrailing) {
   int ret;
   ret = g_ceph_context->_conf->set_val("internal_safe_to_start_threads", "false");
+  ASSERT_EQ(ret, 0);
   ret = g_ceph_context->_conf->set_val("host", "foo");
   ASSERT_EQ(ret, 0);
   ret = g_ceph_context->_conf->set_val("public_network", "bar$host", false);
@@ -73,6 +79,7 @@ TEST(DaemonConfig, SubstitutionTrailing) {
 TEST(DaemonConfig, SubstitutionBraces) {
   int ret;
   ret = g_ceph_context->_conf->set_val("internal_safe_to_start_threads", "false");
+  ASSERT_EQ(ret, 0);
   ret = g_ceph_context->_conf->set_val("host", "foo");
   ASSERT_EQ(ret, 0);
   ret = g_ceph_context->_conf->set_val("public_network", "bar${host}baz", false);
@@ -88,6 +95,7 @@ TEST(DaemonConfig, SubstitutionBraces) {
 TEST(DaemonConfig, SubstitutionBracesTrailing) {
   int ret;
   ret = g_ceph_context->_conf->set_val("internal_safe_to_start_threads", "false");
+  ASSERT_EQ(ret, 0);
   ret = g_ceph_context->_conf->set_val("host", "foo");
   ASSERT_EQ(ret, 0);
   ret = g_ceph_context->_conf->set_val("public_network", "bar${host}", false);
@@ -101,24 +109,21 @@ TEST(DaemonConfig, SubstitutionBracesTrailing) {
   ASSERT_EQ(string("barfoo"), string(buf));
 }
 
-TEST(DaemonConfig, SubstitutionLoop) {
+// config: variable substitution happen only once http://tracker.ceph.com/issues/7103
+TEST(DaemonConfig, SubstitutionMultiple) {
   int ret;
-  ret = g_ceph_context->_conf->set_val("internal_safe_to_start_threads", "false");
-  ret = g_ceph_context->_conf->set_val("host", "foo$public_network", false);
+  ret = g_ceph_context->_conf->set_val("mon_host", "localhost", false);
   ASSERT_EQ(ret, 0);
-  ret = g_ceph_context->_conf->set_val("public_network", "bar$host", false);
+  ret = g_ceph_context->_conf->set_val("keyring", "$mon_host/$cluster.keyring,$mon_host/$cluster.mon.keyring", false);
   ASSERT_EQ(ret, 0);
   g_ceph_context->_conf->apply_changes(NULL);
-  char buf[128], buf2[128];
+  char buf[512];
   memset(buf, 0, sizeof(buf));
-  memset(buf2, 0, sizeof(buf2));
   char *tmp = buf;
-  char *tmp2 = buf;
-  ret = g_ceph_context->_conf->get_val("host", &tmp, sizeof(buf));
+  ret = g_ceph_context->_conf->get_val("keyring", &tmp, sizeof(buf));
   ASSERT_EQ(ret, 0);
-  ret = g_ceph_context->_conf->get_val("public_network", &tmp2, sizeof(buf));
-  ASSERT_EQ(ret, 0);
-  ASSERT_TRUE(strchr(buf, '$') || strchr(buf2, '$'));
+  ASSERT_EQ(string("localhost/ceph.keyring,localhost/ceph.mon.keyring"), tmp);
+  ASSERT_TRUE(strchr(buf, '$') == NULL);
 }
 
 TEST(DaemonConfig, ArgV) {
@@ -126,7 +131,7 @@ TEST(DaemonConfig, ArgV) {
 				       "false"));
 
   int ret;
-  const char *argv[] = { "foo", "--num-client", "22",
+  const char *argv[] = { "foo", "--log-graylog-port", "22",
 			 "--keyfile", "/tmp/my-keyfile", NULL };
   size_t argc = (sizeof(argv) / sizeof(argv[0])) - 1;
   vector<const char*> args;
@@ -142,7 +147,7 @@ TEST(DaemonConfig, ArgV) {
   ASSERT_EQ(string("/tmp/my-keyfile"), string(buf));
 
   memset(buf, 0, sizeof(buf));
-  ret = g_ceph_context->_conf->get_val("num_client", &tmp, sizeof(buf));
+  ret = g_ceph_context->_conf->get_val("log_graylog_port", &tmp, sizeof(buf));
   ASSERT_EQ(ret, 0);
   ASSERT_EQ(string("22"), string(buf));
 
@@ -152,26 +157,26 @@ TEST(DaemonConfig, ArgV) {
 
 TEST(DaemonConfig, InjectArgs) {
   int ret;
-  std::string injection("--num-client 56 --max-open-files 42");
+  std::string injection("--log-graylog-port 56 --leveldb-max-open-files 42");
   ret = g_ceph_context->_conf->injectargs(injection, &cout);
   ASSERT_EQ(ret, 0);
 
   char buf[128];
   char *tmp = buf;
   memset(buf, 0, sizeof(buf));
-  ret = g_ceph_context->_conf->get_val("max_open_files", &tmp, sizeof(buf));
+  ret = g_ceph_context->_conf->get_val("leveldb_max_open_files", &tmp, sizeof(buf));
   ASSERT_EQ(ret, 0);
   ASSERT_EQ(string("42"), string(buf));
 
   memset(buf, 0, sizeof(buf));
-  ret = g_ceph_context->_conf->get_val("num_client", &tmp, sizeof(buf));
+  ret = g_ceph_context->_conf->get_val("log_graylog_port", &tmp, sizeof(buf));
   ASSERT_EQ(ret, 0);
   ASSERT_EQ(string("56"), string(buf));
 
-  injection = "--num-client 57";
+  injection = "--log-graylog-port 57";
   ret = g_ceph_context->_conf->injectargs(injection, &cout);
   ASSERT_EQ(ret, 0);
-  ret = g_ceph_context->_conf->get_val("num_client", &tmp, sizeof(buf));
+  ret = g_ceph_context->_conf->get_val("log_graylog_port", &tmp, sizeof(buf));
   ASSERT_EQ(ret, 0);
   ASSERT_EQ(string("57"), string(buf));
 }
@@ -184,13 +189,13 @@ TEST(DaemonConfig, InjectArgsReject) {
   char *tmp2 = buf2;
 
   // We should complain about the garbage in the input
-  std::string injection("--random-garbage-in-injectargs 26 --num-client 28");
+  std::string injection("--random-garbage-in-injectargs 26 --log-graylog-port 28");
   ret = g_ceph_context->_conf->injectargs(injection, &cout);
   ASSERT_EQ(ret, -EINVAL); 
 
   // But, debug should still be set...
   memset(buf, 0, sizeof(buf));
-  ret = g_ceph_context->_conf->get_val("num_client", &tmp, sizeof(buf));
+  ret = g_ceph_context->_conf->get_val("log_graylog_port", &tmp, sizeof(buf));
   ASSERT_EQ(ret, 0);
   ASSERT_EQ(string("28"), string(buf));
 
@@ -201,7 +206,7 @@ TEST(DaemonConfig, InjectArgsReject) {
 
   // Injectargs shouldn't let us change this, since it is a string-valued
   // variable and there isn't an observer for it.
-  std::string injection2("--osd_data /tmp/some-other-directory --num-client 4");
+  std::string injection2("--osd_data /tmp/some-other-directory --log-graylog-port 4");
   ret = g_ceph_context->_conf->injectargs(injection2, &cout);
   ASSERT_EQ(ret, -ENOSYS); 
 
@@ -218,7 +223,7 @@ TEST(DaemonConfig, InjectArgsBooleans) {
   char *tmp = buf;
 
   // Change log_to_syslog
-  std::string injection("--log_to_syslog --num-client 28");
+  std::string injection("--log_to_syslog --log-graylog-port 28");
   ret = g_ceph_context->_conf->injectargs(injection, &cout);
   ASSERT_EQ(ret, 0);
 
@@ -229,7 +234,7 @@ TEST(DaemonConfig, InjectArgsBooleans) {
   ASSERT_EQ(string("true"), string(buf));
 
   // Turn off log_to_syslog
-  injection = "--log_to_syslog=false --num-client 28";
+  injection = "--log_to_syslog=false --log-graylog-port 28";
   ret = g_ceph_context->_conf->injectargs(injection, &cout);
   ASSERT_EQ(ret, 0);
 
@@ -240,7 +245,7 @@ TEST(DaemonConfig, InjectArgsBooleans) {
   ASSERT_EQ(string("false"), string(buf));
 
   // Turn on log_to_syslog
-  injection = "--num-client 1 --log_to_syslog=true --max-open-files 40";
+  injection = "--log-graylog-port=1 --log_to_syslog=true --leveldb-max-open-files 40";
   ret = g_ceph_context->_conf->injectargs(injection, &cout);
   ASSERT_EQ(ret, 0);
 
@@ -251,7 +256,7 @@ TEST(DaemonConfig, InjectArgsBooleans) {
   ASSERT_EQ(string("true"), string(buf));
 
   // parse error
-  injection = "--num-client 1 --log_to_syslog=falsey --max-open-files 42";
+  injection = "--log-graylog-port 1 --log_to_syslog=falsey --leveldb-max-open-files 42";
   ret = g_ceph_context->_conf->injectargs(injection, &cout);
   ASSERT_EQ(ret, -EINVAL);
 
@@ -263,7 +268,7 @@ TEST(DaemonConfig, InjectArgsBooleans) {
 
   // debug-ms should still become 42...
   memset(buf, 0, sizeof(buf));
-  ret = g_ceph_context->_conf->get_val("max_open_files", &tmp, sizeof(buf));
+  ret = g_ceph_context->_conf->get_val("leveldb_max_open_files", &tmp, sizeof(buf));
   ASSERT_EQ(ret, 0);
   ASSERT_EQ(string("42"), string(buf));
 }
@@ -332,3 +337,43 @@ TEST(DaemonConfig, ThreadSafety1) {
 				       "false"));
   ASSERT_EQ(ret, 0);
 }
+
+TEST(DaemonConfig, InvalidIntegers) {
+  {
+    int ret = g_ceph_context->_conf->set_val("log_graylog_port", "rhubarb");
+    ASSERT_EQ(ret, -EINVAL);
+  }
+
+  {
+    int64_t max = std::numeric_limits<int64_t>::max();
+    string str = boost::lexical_cast<string>(max);
+    str = str + "999"; // some extra digits to take us out of bounds
+    int ret = g_ceph_context->_conf->set_val("log_graylog_port", str);
+    ASSERT_EQ(ret, -EINVAL);
+  }
+}
+
+TEST(DaemonConfig, InvalidFloats) {
+  {
+    double bad_value = 2 * (double)std::numeric_limits<float>::max();
+    string str = boost::lexical_cast<string>(-bad_value);
+    int ret = g_ceph_context->_conf->set_val("log_stop_at_utilization", str);
+    ASSERT_EQ(ret, -EINVAL);
+  }
+  {
+    double bad_value = 2 * (double)std::numeric_limits<float>::max();
+    string str = boost::lexical_cast<string>(bad_value);
+    int ret = g_ceph_context->_conf->set_val("log_stop_at_utilization", str);
+    ASSERT_EQ(ret, -EINVAL);
+  }
+  {
+    int ret = g_ceph_context->_conf->set_val("log_stop_at_utilization", "not a float");
+    ASSERT_EQ(ret, -EINVAL);
+  }
+}
+
+/*
+ * Local Variables:
+ * compile-command: "cd .. ; make unittest_daemon_config && ./unittest_daemon_config"
+ * End:
+ */

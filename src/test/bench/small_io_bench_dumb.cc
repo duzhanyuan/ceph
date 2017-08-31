@@ -1,5 +1,7 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 
+#include "acconfig.h"
+
 #include <boost/scoped_ptr.hpp>
 #include <boost/lexical_cast.hpp>
 #include <boost/program_options/option.hpp>
@@ -20,7 +22,7 @@
 #include "detailed_stat_collector.h"
 #include "distribution.h"
 #include "global/global_init.h"
-#include "os/FileStore.h"
+#include "os/ObjectStore.h"
 #include "dumb_backend.h"
 
 namespace po = boost::program_options;
@@ -69,17 +71,23 @@ int main(int argc, char **argv)
      "don't dump per op stats")
     ;
 
+  vector<string> ceph_option_strings;
   po::variables_map vm;
-  po::parsed_options parsed =
-    po::command_line_parser(argc, argv).options(desc).allow_unregistered().run();
-  po::store(
-    parsed,
-    vm);
-  po::notify(vm);
+  try {
+    po::parsed_options parsed =
+      po::command_line_parser(argc, argv).options(desc).allow_unregistered().run();
+    po::store(
+	      parsed,
+	      vm);
+    po::notify(vm);
 
+    ceph_option_strings = po::collect_unrecognized(parsed.options,
+						   po::include_positional);
+  } catch(po::error &e) {
+    std::cerr << e.what() << std::endl;
+    return 1;
+  }
   vector<const char *> ceph_options, def_args;
-  vector<string> ceph_option_strings = po::collect_unrecognized(
-    parsed.options, po::include_positional);
   ceph_options.reserve(ceph_option_strings.size());
   for (vector<string>::iterator i = ceph_option_strings.begin();
        i != ceph_option_strings.end();
@@ -87,7 +95,7 @@ int main(int argc, char **argv)
     ceph_options.push_back(i->c_str());
   }
 
-  global_init(
+  auto cct = global_init(
     &def_args, ceph_options, CEPH_ENTITY_TYPE_CLIENT,
     CODE_ENVIRONMENT_UTILITY,
     CINIT_FLAG_NO_DEFAULT_CONFIG_FILE);
@@ -190,6 +198,16 @@ int main(int argc, char **argv)
       new WeightedDist<Bencher::OpType>(rng, ops)
       );
   }
+
+#ifndef HAVE_SYNC_FILE_RANGE
+  if (vm["sync-file-range"].as<bool>())
+    std::cerr << "Warning: sync_file_range(2) not supported!" << std::endl;
+#endif
+
+#ifndef HAVE_POSIX_FADVISE
+  if (vm["fadvise"].as<bool>())
+    std::cerr << "Warning: posix_fadvise(2) not supported!" << std::endl;
+#endif
 
   Bencher bencher(
     gen,

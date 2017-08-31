@@ -1,21 +1,19 @@
-
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// vim: ts=8 sw=2 smarttab
+//
 #include <syslog.h>
-
-#include <boost/algorithm/string.hpp>
+#include <boost/algorithm/string/predicate.hpp>
 
 #include "LogEntry.h"
 #include "Formatter.h"
-
 #include "include/stringify.h"
-
-
 
 // ----
 // LogEntryKey
 
-void LogEntryKey::encode(bufferlist& bl) const
+void LogEntryKey::encode(bufferlist& bl, uint64_t features) const
 {
-  ::encode(who, bl);
+  ::encode(who, bl, features);
   ::encode(stamp, bl);
   ::encode(seq, bl);
 }
@@ -25,6 +23,7 @@ void LogEntryKey::decode(bufferlist::iterator& bl)
   ::decode(who, bl);
   ::decode(stamp, bl);
   ::decode(seq, bl);
+  _calc_hash();
 }
 
 void LogEntryKey::dump(Formatter *f) const
@@ -38,6 +37,27 @@ void LogEntryKey::generate_test_instances(list<LogEntryKey*>& o)
 {
   o.push_back(new LogEntryKey);
   o.push_back(new LogEntryKey(entity_inst_t(), utime_t(1,2), 34));
+}
+
+clog_type LogEntry::str_to_level(std::string const &str)
+{
+  std::string level_str = str;
+  std::transform(level_str.begin(), level_str.end(), level_str.begin(),
+      [](char c) {return std::tolower(c);});
+
+  if (level_str == "debug") {
+    return CLOG_DEBUG;
+  } else if (level_str == "info") {
+    return CLOG_INFO;
+  } else if (level_str == "sec") {
+    return CLOG_SEC;
+  } else if (level_str == "warn" || level_str == "warning") {
+    return CLOG_WARN;
+  } else if (level_str == "error" || level_str == "err") {
+    return CLOG_ERROR;
+  } else {
+    return CLOG_UNKNOWN;
+  }
 }
 
 // ----
@@ -56,9 +76,31 @@ int clog_type_to_syslog_level(clog_type t)
     case CLOG_SEC:
       return LOG_CRIT;
     default:
-      assert(0);
+      ceph_abort();
       return 0;
   }
+}
+
+clog_type string_to_clog_type(const string& s)
+{
+  if (boost::iequals(s, "debug") ||
+      boost::iequals(s, "dbg"))
+    return CLOG_DEBUG;
+  if (boost::iequals(s, "info") ||
+      boost::iequals(s, "inf"))
+    return CLOG_INFO;
+  if (boost::iequals(s, "warning") ||
+      boost::iequals(s, "warn") ||
+      boost::iequals(s, "wrn"))
+    return CLOG_WARN;
+  if (boost::iequals(s, "error") ||
+      boost::iequals(s, "err"))
+    return CLOG_ERROR;
+  if (boost::iequals(s, "security") ||
+      boost::iequals(s, "sec"))
+    return CLOG_SEC;
+
+  return CLOG_UNKNOWN;
 }
 
 int string_to_syslog_level(string s)
@@ -130,47 +172,84 @@ int string_to_syslog_facility(string s)
   return LOG_USER;
 }
 
-void LogEntry::log_to_syslog(string level, string facility)
+string clog_type_to_string(clog_type t)
 {
-  int min = string_to_syslog_level(level);
-  int l = clog_type_to_syslog_level(type);
-  if (l <= min) {
-    int f = string_to_syslog_facility(facility);
-    syslog(l | f, "%s", stringify(*this).c_str());
+  switch (t) {
+    case CLOG_DEBUG:
+      return "debug";
+    case CLOG_INFO:
+      return "info";
+    case CLOG_WARN:
+      return "warn";
+    case CLOG_ERROR:
+      return "err";
+    case CLOG_SEC:
+      return "crit";
+    default:
+      ceph_abort();
+      return 0;
   }
 }
 
-void LogEntry::encode(bufferlist& bl) const
+void LogEntry::log_to_syslog(string level, string facility)
 {
-  ENCODE_START(2, 2, bl);
-  __u16 t = type;
-  ::encode(who, bl);
+  int min = string_to_syslog_level(level);
+  int l = clog_type_to_syslog_level(prio);
+  if (l <= min) {
+    int f = string_to_syslog_facility(facility);
+    syslog(l | f, "%s %llu : %s",
+	   stringify(who).c_str(),
+	   (long long unsigned)seq,
+	   msg.c_str());
+  }
+}
+
+void LogEntry::encode(bufferlist& bl, uint64_t features) const
+{
+  ENCODE_START(4, 2, bl);
+  __u16 t = prio;
+  ::encode(who, bl, features);
   ::encode(stamp, bl);
   ::encode(seq, bl);
   ::encode(t, bl);
   ::encode(msg, bl);
+  ::encode(channel, bl);
+  ::encode(name, bl);
   ENCODE_FINISH(bl);
 }
 
 void LogEntry::decode(bufferlist::iterator& bl)
 {
-  DECODE_START_LEGACY_COMPAT_LEN(2, 2, 2, bl);
+  DECODE_START_LEGACY_COMPAT_LEN(4, 2, 2, bl);
   __u16 t;
   ::decode(who, bl);
   ::decode(stamp, bl);
   ::decode(seq, bl);
   ::decode(t, bl);
-  type = (clog_type)t;
+  prio = (clog_type)t;
   ::decode(msg, bl);
+  if (struct_v >= 3) {
+    ::decode(channel, bl);
+  } else {
+    // prior to having logging channels we only had a cluster log.
+    // Ensure we keep that appearance when the other party has no
+    // clue of what a 'channel' is.
+    channel = CLOG_CHANNEL_CLUSTER;
+  }
+  if (struct_v >= 4) {
+    ::decode(name, bl);
+  }
   DECODE_FINISH(bl);
 }
 
 void LogEntry::dump(Formatter *f) const
 {
   f->dump_stream("who") << who;
+  f->dump_stream("name") << name;
   f->dump_stream("stamp") << stamp;
   f->dump_unsigned("seq", seq);
-  f->dump_stream("type") << type;
+  f->dump_string("channel", channel);
+  f->dump_stream("priority") << prio;
   f->dump_string("message", msg);
 }
 
@@ -182,11 +261,11 @@ void LogEntry::generate_test_instances(list<LogEntry*>& o)
 
 // -----
 
-void LogSummary::encode(bufferlist& bl) const
+void LogSummary::encode(bufferlist& bl, uint64_t features) const
 {
   ENCODE_START(2, 2, bl);
   ::encode(version, bl);
-  ::encode(tail, bl);
+  ::encode(tail, bl, features);
   ENCODE_FINISH(bl);
 }
 
@@ -196,6 +275,10 @@ void LogSummary::decode(bufferlist::iterator& bl)
   ::decode(version, bl);
   ::decode(tail, bl);
   DECODE_FINISH(bl);
+  keys.clear();
+  for (auto& p : tail) {
+    keys.insert(p.key());
+  }
 }
 
 void LogSummary::dump(Formatter *f) const
@@ -215,3 +298,4 @@ void LogSummary::generate_test_instances(list<LogSummary*>& o)
   o.push_back(new LogSummary);
   // more!
 }
+

@@ -1,3 +1,6 @@
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// vim: ts=8 sw=2 smarttab
+
 #include <string.h>
 
 #include <iostream>
@@ -94,7 +97,7 @@ class ACLID_S3 : public XMLObj
 {
 public:
   ACLID_S3() {}
-  ~ACLID_S3() {}
+  ~ACLID_S3() override {}
   string& to_str() { return data; }
 };
 
@@ -102,21 +105,21 @@ class ACLURI_S3 : public XMLObj
 {
 public:
   ACLURI_S3() {}
-  ~ACLURI_S3() {}
+  ~ACLURI_S3() override {}
 };
 
 class ACLEmail_S3 : public XMLObj
 {
 public:
   ACLEmail_S3() {}
-  ~ACLEmail_S3() {}
+  ~ACLEmail_S3() override {}
 };
 
 class ACLDisplayName_S3 : public XMLObj
 {
 public:
  ACLDisplayName_S3() {}
- ~ACLDisplayName_S3() {}
+ ~ACLDisplayName_S3() override {}
 };
 
 bool ACLOwner_S3::xml_end(const char *el) {
@@ -135,6 +138,17 @@ bool ACLOwner_S3::xml_end(const char *el) {
     display_name = "";
 
   return true;
+}
+
+void  ACLOwner_S3::to_xml(ostream& out) {
+  string s;
+  id.to_str(s);
+  if (s.empty())
+    return;
+  out << "<Owner>" << "<ID>" << s << "</ID>";
+  if (!display_name.empty())
+    out << "<DisplayName>" << display_name << "</DisplayName>";
+  out << "</Owner>";
 }
 
 bool ACLGrant_S3::xml_end(const char *el) {
@@ -244,16 +258,6 @@ bool ACLGrant_S3::group_to_uri(ACLGroupTypeEnum group, string& uri)
   }
 }
 
-ACLGroupTypeEnum ACLGrant_S3::uri_to_group(string& uri)
-{
-  if (uri.compare(rgw_uri_all_users) == 0)
-    return ACL_GROUP_ALL_USERS;
-  else if (uri.compare(rgw_uri_auth_users) == 0)
-    return ACL_GROUP_AUTHENTICATED_USERS;
-
-  return ACL_GROUP_NONE;
-}
-
 bool RGWAccessControlList_S3::xml_end(const char *el) {
   XMLObjIter iter = find("Grant");
   ACLGrant_S3 *grant = static_cast<ACLGrant_S3 *>(iter.get_next());
@@ -264,12 +268,22 @@ bool RGWAccessControlList_S3::xml_end(const char *el) {
   return true;
 }
 
+void  RGWAccessControlList_S3::to_xml(ostream& out) {
+  multimap<string, ACLGrant>::iterator iter;
+  out << "<AccessControlList>";
+  for (iter = grant_map.begin(); iter != grant_map.end(); ++iter) {
+    ACLGrant_S3& grant = static_cast<ACLGrant_S3 &>(iter->second);
+    grant.to_xml(cct, out);
+  }
+  out << "</AccessControlList>";
+}
+
 struct s3_acl_header {
   int rgw_perm;
   const char *http_header;
 };
 
-static const char *get_acl_header(RGWEnv *env,
+static const char *get_acl_header(const RGWEnv *env,
         const struct s3_acl_header *perm)
 {
   const char *header = perm->http_header;
@@ -299,7 +313,8 @@ static int parse_grantee_str(RGWRados *store, string& grantee_str,
 
     grant.set_canon(info.user_id, info.display_name, rgw_perm);
   } else if (strcasecmp(id_type.c_str(), "id") == 0) {
-    ret = rgw_get_user_info_by_uid(store, id_val, info);
+    rgw_user user(id_val);
+    ret = rgw_get_user_info_by_uid(store, user, info);
     if (ret < 0)
       return ret;
 
@@ -317,7 +332,7 @@ static int parse_grantee_str(RGWRados *store, string& grantee_str,
   return 0;
 }
 
-static int parse_acl_header(RGWRados *store, RGWEnv *env,
+static int parse_acl_header(RGWRados *store, const RGWEnv *env,
          const struct s3_acl_header *perm, std::list<ACLGrant>& _grants)
 {
   std::list<string> grantees;
@@ -349,7 +364,7 @@ int RGWAccessControlList_S3::create_canned(ACLOwner& owner, ACLOwner& bucket_own
 
   ACLGrant owner_grant;
 
-  string bid = bucket_owner.get_id();
+  rgw_user bid = bucket_owner.get_id();
   string bname = bucket_owner.get_display_name();
 
   /* owner gets full control */
@@ -419,6 +434,15 @@ bool RGWAccessControlPolicy_S3::xml_end(const char *el) {
   return true;
 }
 
+void  RGWAccessControlPolicy_S3::to_xml(ostream& out) {
+  out << "<AccessControlPolicy xmlns=\"" << XMLNS_AWS_S3 << "\">";
+  ACLOwner_S3& _owner = static_cast<ACLOwner_S3 &>(owner);
+  RGWAccessControlList_S3& _acl = static_cast<RGWAccessControlList_S3 &>(acl);
+  _owner.to_xml(out);
+  _acl.to_xml(out);
+  out << "</AccessControlPolicy>";
+}
+
 static const s3_acl_header acl_header_perms[] = {
   {RGW_PERM_READ, "HTTP_X_AMZ_GRANT_READ"},
   {RGW_PERM_WRITE, "HTTP_X_AMZ_GRANT_WRITE"},
@@ -428,7 +452,7 @@ static const s3_acl_header acl_header_perms[] = {
   {0, NULL}
 };
 
-int RGWAccessControlPolicy_S3::create_from_headers(RGWRados *store, RGWEnv *env, ACLOwner& _owner)
+int RGWAccessControlPolicy_S3::create_from_headers(RGWRados *store, const RGWEnv *env, ACLOwner& _owner)
 {
   std::list<ACLGrant> grants;
 
@@ -454,8 +478,10 @@ int RGWAccessControlPolicy_S3::rebuild(RGWRados *store, ACLOwner *owner, RGWAcce
     return -EINVAL;
 
   ACLOwner *requested_owner = static_cast<ACLOwner_S3 *>(find_first("Owner"));
-  if (requested_owner && requested_owner->get_id().compare(owner->get_id()) != 0) {
-    return -EPERM;
+  if (requested_owner) {
+    rgw_user& requested_id = requested_owner->get_id();
+    if (!requested_id.empty() && requested_id.compare(owner->get_id()) != 0)
+      return -EPERM;
   }
 
   RGWUserInfo owner_info;
@@ -479,16 +505,18 @@ int RGWAccessControlPolicy_S3::rebuild(RGWRados *store, ACLOwner *owner, RGWAcce
     ACLGranteeType& type = src_grant.get_type();
     ACLGrant new_grant;
     bool grant_ok = false;
-    string uid;
+    rgw_user uid;
     RGWUserInfo grant_user;
     switch (type.get_type()) {
     case ACL_TYPE_EMAIL_USER:
       {
         string email;
-        if (!src_grant.get_id(email)) {
+        rgw_user u;
+        if (!src_grant.get_id(u)) {
           ldout(cct, 0) << "ERROR: src_grant.get_id() failed" << dendl;
           return -EINVAL;
         }
+        email = u.id;
         ldout(cct, 10) << "grant user email=" << email << dendl;
         if (rgw_get_user_info_by_email(store, email, grant_user) < 0) {
           ldout(cct, 10) << "grant user email not found or other error" << dendl;
@@ -512,7 +540,7 @@ int RGWAccessControlPolicy_S3::rebuild(RGWRados *store, ACLOwner *owner, RGWAcce
           ACLPermission& perm = src_grant.get_permission();
           new_grant.set_canon(uid, grant_user.display_name, perm.get_permissions());
           grant_ok = true;
-          string new_id;
+          rgw_user new_id;
           new_grant.get_id(new_id);
           ldout(cct, 10) << "new grant: " << new_id << ":" << grant_user.display_name << dendl;
         }
@@ -545,7 +573,7 @@ bool RGWAccessControlPolicy_S3::compare_group_name(string& id, ACLGroupTypeEnum 
 {
   switch (group) {
   case ACL_GROUP_ALL_USERS:
-    return (id.compare(rgw_uri_all_users) == 0);
+    return (id.compare(RGW_USER_ANON_ID) == 0);
   case ACL_GROUP_AUTHENTICATED_USERS:
     return (id.compare(rgw_uri_auth_users) == 0);
   default:

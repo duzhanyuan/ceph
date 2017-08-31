@@ -4,33 +4,75 @@
 #include <list>
 #include <map>
 #include <set>
+#include <iostream>
 
 #include "Object.h"
 
-ostream &operator<<(ostream &out, const ContDesc &rhs)
+void ContDesc::encode(bufferlist &bl) const
+{
+  ENCODE_START(1, 1, bl);
+  ::encode(objnum, bl);
+  ::encode(cursnap, bl);
+  ::encode(seqnum, bl);
+  ::encode(prefix, bl);
+  ::encode(oid, bl);
+  ENCODE_FINISH(bl);
+}
+
+void ContDesc::decode(bufferlist::iterator &bl)
+{
+  DECODE_START(1, bl);
+  ::decode(objnum, bl);
+  ::decode(cursnap, bl);
+  ::decode(seqnum, bl);
+  ::decode(prefix, bl);
+  ::decode(oid, bl);
+  DECODE_FINISH(bl);
+}
+
+std::ostream &operator<<(std::ostream &out, const ContDesc &rhs)
 {
   return out << "(ObjNum " << rhs.objnum
 	     << " snap " << rhs.cursnap
 	     << " seq_num " << rhs.seqnum
-    //<< " prefix " << rhs.prefix
 	     << ")";
 }
 
-void VarLenGenerator::get_ranges(const ContDesc &cont, interval_set<uint64_t> &out) {
+void AppendGenerator::get_ranges_map(
+  const ContDesc &cont, std::map<uint64_t, uint64_t> &out) {
   RandWrap rand(cont.seqnum);
-  uint64_t pos = get_header_length(cont);
+  uint64_t pos = off;
+  uint64_t limit = off + get_append_size(cont);
+  while (pos < limit) {
+    uint64_t segment_length = round_up(
+      rand() % (max_append_size - min_append_size),
+      alignment) + min_append_size;
+    assert(segment_length >= min_append_size);
+    if (segment_length + pos > limit) {
+      segment_length = limit - pos;
+    }
+    if (alignment)
+      assert(segment_length % alignment == 0);
+    out.insert(std::pair<uint64_t, uint64_t>(pos, segment_length));
+    pos += segment_length;
+  }
+}
+
+void VarLenGenerator::get_ranges_map(
+  const ContDesc &cont, std::map<uint64_t, uint64_t> &out) {
+  RandWrap rand(cont.seqnum);
+  uint64_t pos = 0;
   uint64_t limit = get_length(cont);
-  out.insert(0, pos);
   bool include = false;
   while (pos < limit) {
     uint64_t segment_length = (rand() % (max_stride_size - min_stride_size)) + min_stride_size;
     assert(segment_length < max_stride_size);
     assert(segment_length >= min_stride_size);
-    if (segment_length + pos >= limit) {
+    if (segment_length + pos > limit) {
       segment_length = limit - pos;
     }
     if (include) {
-      out.insert(pos, segment_length);
+      out.insert(std::pair<uint64_t, uint64_t>(pos, segment_length));
       include = false;
     } else {
       include = true;
@@ -39,141 +81,125 @@ void VarLenGenerator::get_ranges(const ContDesc &cont, interval_set<uint64_t> &o
   }
 }
 
-void VarLenGenerator::write_header(const ContDesc &in, bufferlist &output) {
-  int data[6];
-  data[0] = 0xDEADBEEF;
-  data[1] = in.objnum;
-  data[2] = in.cursnap;
-  data[3] = (int)in.seqnum;
-  data[4] = in.prefix.size();
-  data[5] = 0xDEADBEEF;
-  output.append((char *)data, sizeof(data));
-  output.append(in.prefix.c_str(), in.prefix.size());
-  output.append((char *)data, sizeof(data[0]));
+void ObjectDesc::iterator::adjust_stack() {
+  while (!stack.empty() && pos >= stack.front().second.next) {
+    assert(pos == stack.front().second.next);
+    size = stack.front().second.size;
+    current = stack.front().first;
+    stack.pop_front();
+  }
+
+  if (stack.empty()) {
+    cur_valid_till = std::numeric_limits<uint64_t>::max();
+  } else {
+    cur_valid_till = stack.front().second.next;
+  }
+
+  while (current != layers.end() && !current->covers(pos)) {
+    uint64_t next = current->next(pos);
+    if (next < cur_valid_till) {
+      stack.push_front(
+	make_pair(
+	  current,
+	  StackState{next, size}
+	  )
+	);
+      cur_valid_till = next;
+    }
+
+    ++current;
+  }
+
+  if (current == layers.end()) {
+    size = 0;
+  } else {
+    current->iter.seek(pos);
+    size = std::min(size, current->get_size());
+    cur_valid_till = std::min(
+      current->valid_till(pos),
+      cur_valid_till);
+  }
 }
 
-bool VarLenGenerator::read_header(bufferlist::iterator &p, ContDesc &out) {
-  try {
-    int data[6];
-    p.copy(sizeof(data), (char *)data);
-    if ((unsigned)data[0] != 0xDEADBEEF || (unsigned)data[5] != 0xDEADBEEF) return false;
-    out.objnum = data[1];
-    out.cursnap = data[2];
-    out.seqnum = (unsigned) data[3];
-    int prefix_size = data[4];
-    if (prefix_size >= 1000 || prefix_size <= 0) {
-      std::cerr << "prefix size is " << prefix_size << std::endl;
-      return false;
-    }
-    char buffer[1000];
-    p.copy(prefix_size, buffer);
-    buffer[prefix_size] = 0;
-    out.prefix = buffer;
-    unsigned test;
-    p.copy(sizeof(test), (char *)&test);
-    if (test != 0xDEADBEEF) return false;
-  } catch (ceph::buffer::end_of_buffer &e) {
-    std::cerr << "end_of_buffer" << endl;
+const ContDesc &ObjectDesc::most_recent() {
+  return layers.begin()->second;
+}
+
+void ObjectDesc::update(ContentsGenerator *gen, const ContDesc &next) {
+  layers.push_front(std::pair<ceph::shared_ptr<ContentsGenerator>, ContDesc>(ceph::shared_ptr<ContentsGenerator>(gen), next));
+  return;
+}
+
+bool ObjectDesc::check(bufferlist &to_check) {
+  iterator objiter = begin();
+  uint64_t error_at = 0;
+  if (!objiter.check_bl_advance(to_check, &error_at)) {
+    std::cout << "incorrect buffer at pos " << error_at << std::endl;
+    return false;
+  }
+
+  uint64_t size = layers.begin()->first->get_length(layers.begin()->second);
+  if (to_check.length() < size) {
+    std::cout << "only read " << to_check.length()
+	      << " out of size " << size << std::endl;
     return false;
   }
   return true;
 }
 
-ObjectDesc::iterator &ObjectDesc::iterator::advance(bool init) {
-  assert(pos < limit);
-  assert(!end());
-  if (!init) {
-    pos++;
-  }
-  if (end()) {
-    return *this;
-  }
-  while (pos == limit) {
-    limit = *stack.begin();
-    stack.pop_front();
-    --cur_cont;
-  }
-
-  if (cur_cont == obj.layers.end()) {
-    return *this;
-  }
-
-  interval_set<uint64_t> ranges;
-  cont_gen->get_ranges(*cur_cont, ranges);
-  while (!ranges.contains(pos)) {
-    stack.push_front(limit);
-    uint64_t next;
-    if (pos >= ranges.range_end()) {
-      next = limit;
-    } else {
-      next = ranges.start_after(pos);
-    }
-    if (next < limit) {
-      limit = next;
-    }
-    ++cur_cont;
-    if (cur_cont == obj.layers.end()) {
-      break;
-    }
-
-    ranges.clear();
-    cont_gen->get_ranges(*cur_cont, ranges);
-  }
-
-  if (cur_cont == obj.layers.end()) {
-    return *this;
-  }
-
-  if (!cont_iters.count(*cur_cont)) {
-    cont_iters.insert(pair<ContDesc,ContentsGenerator::iterator>(*cur_cont, 
-								 cont_gen->get_iterator(*cur_cont)));
-  }
-  map<ContDesc,ContentsGenerator::iterator>::iterator j = cont_iters.find(*cur_cont);
-  assert(j != cont_iters.end());
-  j->second.seek(pos);
-  return *this;
-}
-
-const ContDesc &ObjectDesc::most_recent() {
-  return *layers.begin();
-}
-
-void ObjectDesc::update(const ContDesc &next) {
-  layers.push_front(next);
-  return;
-  /*
-  interval_set<uint64_t> fall_through;
-  fall_through.insert(0, cont_gen->get_length(next));
-  for (list<ContDesc>::iterator i = layers.begin();
-       i != layers.end();
-       ) {
-    interval_set<uint64_t> valid;
-    cont_gen->get_ranges(*i, valid);
-    valid.intersection_of(fall_through);
-    if (valid.empty()) {
-      layers.erase(i++);
-      continue;
-    }
-    fall_through.subtract(valid);
-    ++i;
-  }
-  */
-}
-
-bool ObjectDesc::check(bufferlist &to_check) {
-  iterator i = begin();
+bool ObjectDesc::check_sparse(const std::map<uint64_t, uint64_t>& extents,
+			      bufferlist &to_check)
+{
+  uint64_t off = 0;
   uint64_t pos = 0;
-  for (bufferlist::iterator p = to_check.begin();
-       !p.end();
-       ++p, ++i, ++pos) {
-    if (i.end()) {
+  auto objiter = begin();
+  for (auto &&extiter : extents) {
+    // verify hole
+    {
+      bufferlist bl;
+      bl.append_zero(extiter.first - pos);
+      uint64_t error_at = 0;
+      if (!objiter.check_bl_advance(bl, &error_at)) {
+	std::cout << "sparse read omitted non-zero data at "
+		  << error_at << std::endl;
+	return false;
+      }
+    }
+
+    assert(off <= to_check.length());
+    pos = extiter.first;
+    objiter.seek(pos);
+
+    {
+      bufferlist bl;
+      bl.substr_of(
+	to_check,
+	off,
+	std::min(to_check.length() - off, extiter.second));
+      uint64_t error_at = 0;
+      if (!objiter.check_bl_advance(bl, &error_at)) {
+	std::cout << "incorrect buffer at pos " << error_at << std::endl;
+	return false;
+      }
+      off += extiter.second;
+      pos += extiter.second;
+    }
+
+    if (pos < extiter.first + extiter.second) {
       std::cout << "reached end of iterator first" << std::endl;
       return false;
     }
-    if (*i != *p) {
-      std::cout << "incorrect buffer at pos " << pos << std::endl;
-      return false;
-    }
+  }
+
+  // final hole
+  bufferlist bl;
+  uint64_t size = layers.begin()->first->get_length(layers.begin()->second);
+  bl.append_zero(size - pos);
+  uint64_t error_at;
+  if (!objiter.check_bl_advance(bl, &error_at)) {
+    std::cout << "sparse read omitted non-zero data at "
+	      << error_at << std::endl;
+    return false;
   }
   return true;
 }

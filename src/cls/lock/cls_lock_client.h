@@ -4,17 +4,19 @@
 #ifndef CEPH_CLS_LOCK_CLIENT_H
 #define CEPH_CLS_LOCK_CLIENT_H
 
-
-#include "include/types.h"
-#include "include/rados/librados.hpp"
-
 #include "cls/lock/cls_lock_types.h"
 
+namespace librados {
+  class AioCompletion;
+  class ObjectWriteOperation;
+  class IoCtx;
+  class ObjectReadOperation;
+  class ObjectOperation;
+}
 
 namespace rados {
   namespace cls {
     namespace lock {
-
       extern void lock(librados::ObjectWriteOperation *rados_op,
 		       const std::string& name, ClsLockType type,
 		       const std::string& cookie, const std::string& tag,
@@ -33,6 +35,10 @@ namespace rados {
 
       extern int unlock(librados::IoCtx *ioctx, const std::string& oid,
 			const std::string& name, const std::string& cookie);
+
+      extern int aio_unlock(librados::IoCtx *ioctx, const std::string& oid,
+			    const std::string& name, const std::string& cookie,
+			    librados::AioCompletion *completion);
 
       extern void break_lock(librados::ObjectWriteOperation *op,
 			     const std::string& name, const std::string& cookie,
@@ -54,6 +60,16 @@ namespace rados {
 			       const std::string& name,
 			       map<locker_id_t, locker_info_t> *lockers,
 			       ClsLockType *type, std::string *tag);
+
+      extern void assert_locked(librados::ObjectOperation *rados_op,
+                                const std::string& name, ClsLockType type,
+                                const std::string& cookie,
+                                const std::string& tag);
+
+      extern void set_cookie(librados::ObjectWriteOperation *rados_op,
+                             const std::string& name, ClsLockType type,
+                             const std::string& cookie, const std::string& tag,
+                             const std::string& new_cookie);
 
       class Lock {
 	std::string name;
@@ -78,6 +94,9 @@ namespace rados {
 	    flags &= ~LOCK_FLAG_RENEW;
 	  }
 	}
+
+        void assert_locked_exclusive(librados::ObjectOperation *rados_op);
+        void assert_locked_shared(librados::ObjectOperation *rados_op);
 
 	/* ObjectWriteOperation */
 	void lock_exclusive(librados::ObjectWriteOperation *ioctx);

@@ -1,4 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// vim: ts=8 sw=2 smarttab
 #include "common/Mutex.h"
 #include "common/Cond.h"
 #include "common/errno.h"
@@ -26,9 +27,16 @@ public:
 			int objects,
 			map<TestOpType, unsigned int> op_weights,
 			TestOpStat *stats,
-			int max_seconds) :
-    m_nextop(NULL), m_op(0), m_ops(ops), m_seconds(max_seconds), m_objects(objects), m_stats(stats),
-    m_total_weight(0)
+			int max_seconds,
+			bool ec_pool,
+			bool balance_reads,
+			bool set_redirect) :
+    m_nextop(NULL), m_op(0), m_ops(ops), m_seconds(max_seconds),
+    m_objects(objects), m_stats(stats),
+    m_total_weight(0),
+    m_ec_pool(ec_pool),
+    m_balance_reads(balance_reads),
+    m_set_redirect(set_redirect)
   {
     m_start = time(0);
     for (map<TestOpType, unsigned int>::const_iterator it = op_weights.begin();
@@ -38,9 +46,15 @@ public:
       m_weight_sums.insert(pair<TestOpType, unsigned int>(it->first,
 							  m_total_weight));
     }
+    if (m_set_redirect) {
+      /* create redirect objects + set-redirect*/
+      m_redirect_objects = objects*2; // for copy_from + set-redirect test
+      m_initial_redirected_objects = objects;
+      m_ops = ops+m_redirect_objects+m_initial_redirected_objects;
+    }
   }
 
-  TestOp *next(RadosTestContext &context)
+  TestOp *next(RadosTestContext &context) override
   {
     TestOp *retval = NULL;
 
@@ -48,10 +62,86 @@ public:
     if (m_op <= m_objects) {
       stringstream oid;
       oid << m_op;
+      if (m_op % 2) {
+	// make it a long name
+	oid << " " << string(300, 'o');
+      }
       cout << m_op << ": write initial oid " << oid.str() << std::endl;
-      return new WriteOp(m_op, &context, oid.str());
+      context.oid_not_flushing.insert(oid.str());
+      if (m_ec_pool) {
+	return new WriteOp(m_op, &context, oid.str(), true, true);
+      } else {
+	return new WriteOp(m_op, &context, oid.str(), false, true);
+      }
     } else if (m_op >= m_ops) {
       return NULL;
+    }
+    
+    if (m_set_redirect) {
+      /*
+       * set-redirect test
+       * 1. create objects (copy from)
+       * 2. set-redirect
+       */
+      int create_objects_end = m_objects + m_redirect_objects;
+      int set_redirect_end = create_objects_end + m_initial_redirected_objects; 
+
+      if (m_op <= create_objects_end) {
+	stringstream oid;
+	int _oid = m_op;
+	oid << _oid;
+	if ((_oid) % 2) {
+	  oid << " " << string(300, 'o');
+	}
+	stringstream oid2;
+	int _oid2 = _oid - m_objects;
+	oid2 << _oid2;
+	if ((_oid2) % 2) {
+	  oid2 << " " << string(300, 'o');
+	}
+	cout << m_op << ": " << "(create redirect oid) copy_from oid " << oid.str() 
+	      << " from oid " << oid2.str() << std::endl;
+	return new CopyFromOp(m_op, &context, oid.str(), oid2.str(), m_stats);
+      } else if (m_op <= set_redirect_end) {
+	stringstream oid;
+	int _oid = m_op-create_objects_end;
+	oid << _oid;
+	if ((_oid) % 2) {
+	  oid << " " << string(300, 'o');
+	}
+	stringstream oid2;
+	int _oid2 = _oid + m_objects;
+	oid2 << _oid2;
+	if ((_oid2) % 2) {
+	  oid2 << " " << string(300, 'o');
+	}
+	cout << m_op << ": " << "set_redirect oid " << oid.str() << " target oid " 
+	      << oid2.str() << std::endl;
+	return new SetRedirectOp(m_op, &context, oid.str(), oid2.str(), context.pool_name);
+      } 
+
+      if (!context.oid_redirect_not_in_use.size() && m_op > set_redirect_end) {
+	int set_size = context.oid_not_in_use.size();
+        if (set_size < m_objects + m_redirect_objects) {
+          return NULL;
+        }
+        for (int t_op = m_objects+1; t_op <= create_objects_end; t_op++) {
+          stringstream oid;
+          oid << t_op;
+          if (t_op % 2) {
+            oid << " " << string(300, 'o');
+          }
+          context.oid_not_flushing.erase(oid.str());
+          context.oid_not_in_use.erase(oid.str());
+          context.oid_in_use.erase(oid.str());
+          cout << m_op << ": " << " remove oid " << oid.str() << " from oid_*_use " << std::endl;
+          if (t_op > m_objects + m_initial_redirected_objects) {
+            context.oid_redirect_not_in_use.insert(oid.str());
+          }
+        }
+	cout << m_op << ": " << " oid_not_in_use: " << context.oid_not_in_use.size()
+	      << " oid_in_use: " << context.oid_in_use.size() << std::endl;
+      }
     }
 
     if (m_nextop) {
@@ -84,30 +174,41 @@ private:
   TestOp *gen_op(RadosTestContext &context, TestOpType type)
   {
     string oid, oid2;
-    //cout << "oids not in use " << context.oid_not_in_use.size() << std::endl;
     assert(context.oid_not_in_use.size());
 
-    cout << m_op << ": ";
     switch (type) {
     case TEST_OP_READ:
       oid = *(rand_choose(context.oid_not_in_use));
-      cout << "read oid " << oid << std::endl;
-      return new ReadOp(m_op, &context, oid, m_stats);
+      return new ReadOp(m_op, &context, oid, m_balance_reads, m_stats);
 
     case TEST_OP_WRITE:
       oid = *(rand_choose(context.oid_not_in_use));
-      cout << "write oid " << oid << " current snap is "
+      cout << m_op << ": " << "write oid " << oid << " current snap is "
 	   << context.current_snap << std::endl;
-      return new WriteOp(m_op, &context, oid, m_stats);
+      return new WriteOp(m_op, &context, oid, false, false, m_stats);
+
+    case TEST_OP_WRITE_EXCL:
+      oid = *(rand_choose(context.oid_not_in_use));
+      cout << m_op << ": " << "write (excl) oid "
+	   << oid << " current snap is "
+	   << context.current_snap << std::endl;
+      return new WriteOp(m_op, &context, oid, false, true, m_stats);
+
+    case TEST_OP_WRITESAME:
+      oid = *(rand_choose(context.oid_not_in_use));
+      cout << m_op << ": " << "writesame oid "
+	   << oid << " current snap is "
+	   << context.current_snap << std::endl;
+      return new WriteSameOp(m_op, &context, oid, m_stats);
 
     case TEST_OP_DELETE:
       oid = *(rand_choose(context.oid_not_in_use));
-      cout << "delete oid " << oid << " current snap is "
+      cout << m_op << ": " << "delete oid " << oid << " current snap is "
 	   << context.current_snap << std::endl;
       return new DeleteOp(m_op, &context, oid, m_stats);
 
     case TEST_OP_SNAP_CREATE:
-      cout << "snap_create" << std::endl;
+      cout << m_op << ": " << "snap_create" << std::endl;
       return new SnapCreateOp(m_op, &context, m_stats);
 
     case TEST_OP_SNAP_REMOVE:
@@ -118,38 +219,33 @@ private:
 	int snap = rand_choose(context.snaps)->first;
 	if (context.snaps_in_use.lookup(snap))
 	  continue;  // in use; try again!
-	cout << "snap_remove snap " << snap << std::endl;
+	cout << m_op << ": " << "snap_remove snap " << snap << std::endl;
 	return new SnapRemoveOp(m_op, &context, snap, m_stats);
       }
 
     case TEST_OP_ROLLBACK:
       {
 	string oid = *(rand_choose(context.oid_not_in_use));
-	cout << "rollback oid " << oid << std::endl;
+	cout << m_op << ": " << "rollback oid " << oid << " current snap is "
+	     << context.current_snap << std::endl;
 	return new RollbackOp(m_op, &context, oid);
       }
 
     case TEST_OP_SETATTR:
       oid = *(rand_choose(context.oid_not_in_use));
-      cout << "setattr oid " << oid
+      cout << m_op << ": " << "setattr oid " << oid
 	   << " current snap is " << context.current_snap << std::endl;
       return new SetAttrsOp(m_op, &context, oid, m_stats);
 
     case TEST_OP_RMATTR:
       oid = *(rand_choose(context.oid_not_in_use));
-      cout << "rmattr oid " << oid
+      cout << m_op << ": " << "rmattr oid " << oid
 	   << " current snap is " << context.current_snap << std::endl;
       return new RemoveAttrsOp(m_op, &context, oid, m_stats);
 
-    case TEST_OP_TMAPPUT:
-      oid = *(rand_choose(context.oid_not_in_use));
-      cout << "tmapput oid " << oid
-	   << " current snap is " << context.current_snap << std::endl;
-      return new TmapPutOp(m_op, &context, oid, m_stats);
-
     case TEST_OP_WATCH:
       oid = *(rand_choose(context.oid_not_in_use));
-      cout << "watch oid " << oid
+      cout << m_op << ": " << "watch oid " << oid
 	   << " current snap is " << context.current_snap << std::endl;
       return new WatchOp(m_op, &context, oid, m_stats);
 
@@ -158,13 +254,75 @@ private:
       do {
 	oid2 = *(rand_choose(context.oid_not_in_use));
       } while (oid == oid2);
-      cout << "copy_from oid " << oid << " from oid " << oid2
+      cout << m_op << ": " << "copy_from oid " << oid << " from oid " << oid2
 	   << " current snap is " << context.current_snap << std::endl;
       return new CopyFromOp(m_op, &context, oid, oid2, m_stats);
 
+    case TEST_OP_HIT_SET_LIST:
+      {
+	uint32_t hash = rjhash32(rand());
+	cout << m_op << ": " << "hit_set_list " << hash << std::endl;
+	return new HitSetListOp(m_op, &context, hash, m_stats);
+      }
+
+    case TEST_OP_UNDIRTY:
+      {
+	oid = *(rand_choose(context.oid_not_in_use));
+	cout << m_op << ": " << "undirty oid " << oid << std::endl;
+	return new UndirtyOp(m_op, &context, oid, m_stats);
+      }
+
+    case TEST_OP_IS_DIRTY:
+      {
+	oid = *(rand_choose(context.oid_not_flushing));
+	return new IsDirtyOp(m_op, &context, oid, m_stats);
+      }
+
+    case TEST_OP_CACHE_FLUSH:
+      {
+	oid = *(rand_choose(context.oid_not_in_use));
+	return new CacheFlushOp(m_op, &context, oid, m_stats, true);
+      }
+
+    case TEST_OP_CACHE_TRY_FLUSH:
+      {
+	oid = *(rand_choose(context.oid_not_in_use));
+	return new CacheFlushOp(m_op, &context, oid, m_stats, false);
+      }
+
+    case TEST_OP_CACHE_EVICT:
+      {
+	oid = *(rand_choose(context.oid_not_in_use));
+	return new CacheEvictOp(m_op, &context, oid, m_stats);
+      }
+
+    case TEST_OP_APPEND:
+      oid = *(rand_choose(context.oid_not_in_use));
+      cout << "append oid " << oid << " current snap is "
+	   << context.current_snap << std::endl;
+      return new WriteOp(m_op, &context, oid, true, false, m_stats);
+
+    case TEST_OP_APPEND_EXCL:
+      oid = *(rand_choose(context.oid_not_in_use));
+      cout << "append oid (excl) " << oid << " current snap is "
+	   << context.current_snap << std::endl;
+      return new WriteOp(m_op, &context, oid, true, true, m_stats);
+
+    case TEST_OP_SET_REDIRECT:
+      oid = *(rand_choose(context.oid_not_in_use));
+      oid2 = *(rand_choose(context.oid_redirect_not_in_use));
+      cout << m_op << ": " << "set_redirect oid " << oid << " target oid " << oid2 << std::endl;
+      return new SetRedirectOp(m_op, &context, oid, oid2, context.pool_name, m_stats);
+
+    case TEST_OP_UNSET_REDIRECT:
+      oid = *(rand_choose(context.oid_not_in_use));
+      cout << m_op << ": " << "unset_redirect oid " << oid << std::endl;
+      return new UnsetRedirectOp(m_op, &context, oid, m_stats);
+
     default:
-      cerr << "Invalid op type " << type << std::endl;
-      assert(0);
+      cerr << m_op << ": Invalid op type " << type << std::endl;
+      ceph_abort();
+      return nullptr;
     }
   }
 
@@ -177,6 +335,11 @@ private:
   TestOpStat *m_stats;
   map<TestOpType, unsigned int> m_weight_sums;
   unsigned int m_total_weight;
+  bool m_ec_pool;
+  bool m_balance_reads;
+  bool m_set_redirect;
+  int m_redirect_objects{0};
+  int m_initial_redirected_objects{0}; 
 };
 
 int main(int argc, char **argv)
@@ -187,27 +350,46 @@ int main(int argc, char **argv)
   int64_t size = 4000000; // 4 MB
   int64_t min_stride_size = -1, max_stride_size = -1;
   int max_seconds = 0;
+  bool pool_snaps = false;
+  bool write_fadvise_dontneed = false;
 
   struct {
     TestOpType op;
     const char *name;
+    bool ec_pool_valid;
   } op_types[] = {
-    { TEST_OP_READ, "read" },
-    { TEST_OP_WRITE, "write" },
-    { TEST_OP_DELETE, "delete" },
-    { TEST_OP_SNAP_CREATE, "snap_create" },
-    { TEST_OP_SNAP_REMOVE, "snap_remove" },
-    { TEST_OP_ROLLBACK, "rollback" },
-    { TEST_OP_SETATTR, "setattr" },
-    { TEST_OP_RMATTR, "rmattr" },
-    { TEST_OP_TMAPPUT, "tmapput" },
-    { TEST_OP_WATCH, "watch" },
-    { TEST_OP_COPY_FROM, "copy_from" },
+    { TEST_OP_READ, "read", true },
+    { TEST_OP_WRITE, "write", false },
+    { TEST_OP_WRITE_EXCL, "write_excl", false },
+    { TEST_OP_WRITESAME, "writesame", false },
+    { TEST_OP_DELETE, "delete", true },
+    { TEST_OP_SNAP_CREATE, "snap_create", true },
+    { TEST_OP_SNAP_REMOVE, "snap_remove", true },
+    { TEST_OP_ROLLBACK, "rollback", true },
+    { TEST_OP_SETATTR, "setattr", true },
+    { TEST_OP_RMATTR, "rmattr", true },
+    { TEST_OP_WATCH, "watch", true },
+    { TEST_OP_COPY_FROM, "copy_from", true },
+    { TEST_OP_HIT_SET_LIST, "hit_set_list", true },
+    { TEST_OP_IS_DIRTY, "is_dirty", true },
+    { TEST_OP_UNDIRTY, "undirty", true },
+    { TEST_OP_CACHE_FLUSH, "cache_flush", true },
+    { TEST_OP_CACHE_TRY_FLUSH, "cache_try_flush", true },
+    { TEST_OP_CACHE_EVICT, "cache_evict", true },
+    { TEST_OP_APPEND, "append", true },
+    { TEST_OP_APPEND_EXCL, "append_excl", true },
+    { TEST_OP_SET_REDIRECT, "set_redirect", true },
+    { TEST_OP_UNSET_REDIRECT, "unset_redirect", true },
     { TEST_OP_READ /* grr */, NULL },
   };
 
   map<TestOpType, unsigned int> op_weights;
-  string pool_name = "data";
+  string pool_name = "rbd";
+  bool ec_pool = false;
+  bool no_omap = false;
+  bool no_sparse = false;
+  bool balance_reads = false;
+  bool set_redirect = false;
 
   for (int i = 1; i < argc; ++i) {
     if (strcmp(argv[i], "--max-ops") == 0)
@@ -226,8 +408,30 @@ int main(int argc, char **argv)
       min_stride_size = atoi(argv[++i]);
     else if (strcmp(argv[i], "--max-stride-size") == 0)
       max_stride_size = atoi(argv[++i]);
-    else if (strcmp(argv[i], "--op") == 0) {
+    else if (strcmp(argv[i], "--no-omap") == 0)
+      no_omap = true;
+    else if (strcmp(argv[i], "--no-sparse") == 0)
+      no_sparse = true;
+    else if (strcmp(argv[i], "--balance_reads") == 0)
+      balance_reads = true;
+    else if (strcmp(argv[i], "--pool-snaps") == 0)
+      pool_snaps = true;
+    else if (strcmp(argv[i], "--write-fadvise-dontneed") == 0)
+      write_fadvise_dontneed = true;
+    else if (strcmp(argv[i], "--ec-pool") == 0) {
+      if (!op_weights.empty()) {
+	cerr << "--ec-pool must be specified prior to any ops" << std::endl;
+	exit(1);
+      }
+      ec_pool = true;
+      no_omap = true;
+      no_sparse = true;
+    } else if (strcmp(argv[i], "--op") == 0) {
       i++;
+      if (i == argc) {
+        cerr << "Missing op after --op" << std::endl;
+        return 1;
+      }
       int j;
       for (j = 0; op_types[j].name; ++j) {
 	if (strcmp(op_types[j].name, argv[i]) == 0) {
@@ -238,23 +442,34 @@ int main(int argc, char **argv)
 	cerr << "unknown op " << argv[i] << std::endl;
 	exit(1);
       }
-      int weight = atoi(argv[++i]);
+      i++;
+      if (i == argc) {
+	cerr << "Weight unspecified." << std::endl;
+	return 1;
+      }
+      int weight = atoi(argv[i]);
       if (weight < 0) {
 	cerr << "Weights must be nonnegative." << std::endl;
 	return 1;
+      } else if (weight > 0) {
+	if (ec_pool && !op_types[j].ec_pool_valid) {
+	  cerr << "Error: cannot use op type " << op_types[j].name
+	       << " with --ec-pool" << std::endl;
+	  exit(1);
+	}
+	cout << "adding op weight " << op_types[j].name << " -> " << weight << std::endl;
+	op_weights.insert(pair<TestOpType, unsigned int>(op_types[j].op, weight));
       }
-      cout << "adding op weight " << op_types[j].name << " -> " << weight << std::endl;
-      op_weights.insert(pair<TestOpType, unsigned int>(op_types[j].op, weight));
+    } else if (strcmp(argv[i], "--set_redirect") == 0) {
+      set_redirect = true;
     } else {
       cerr << "unknown arg " << argv[i] << std::endl;
-      //usage();
       exit(1);
     }
   }
 
   if (op_weights.empty()) {
     cerr << "No operations specified" << std::endl;
-    //usage();
     exit(1);
   }
 
@@ -272,8 +487,8 @@ int main(int argc, char **argv)
        << "\tWrite stride min: " << min_stride_size << std::endl
        << "\tWrite stride max: " << max_stride_size << std::endl;
 
-  if (min_stride_size > max_stride_size) {
-    cerr << "Error: min_stride_size cannot be more than max_stride_size"
+  if (min_stride_size >= max_stride_size) {
+    cerr << "Error: max_stride_size must be more than min_stride_size"
 	 << std::endl;
     return 1;
   }
@@ -291,12 +506,23 @@ int main(int argc, char **argv)
   }
 
   char *id = getenv("CEPH_CLIENT_ID");
-  VarLenGenerator cont_gen(size, min_stride_size, max_stride_size);
-  RadosTestContext context(pool_name, max_in_flight, cont_gen, id);
+  RadosTestContext context(
+    pool_name,
+    max_in_flight,
+    size,
+    min_stride_size,
+    max_stride_size,
+    no_omap,
+    no_sparse,
+    pool_snaps,
+    write_fadvise_dontneed,
+    id);
 
   TestOpStat stats;
-  WeightedTestGenerator gen = WeightedTestGenerator(ops, objects,
-						    op_weights, &stats, max_seconds);
+  WeightedTestGenerator gen = WeightedTestGenerator(
+    ops, objects,
+    op_weights, &stats, max_seconds,
+    ec_pool, balance_reads, set_redirect);
   int r = context.init();
   if (r < 0) {
     cerr << "Error initializing rados test context: "

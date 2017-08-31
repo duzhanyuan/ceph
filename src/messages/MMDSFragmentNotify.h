@@ -16,8 +16,6 @@
 #define CEPH_MMDSFRAGMENTNOTIFY_H
 
 #include "msg/Message.h"
-#include <string>
-using namespace std;
 
 class MMDSFragmentNotify : public Message {
   inodeno_t ino;
@@ -32,26 +30,26 @@ class MMDSFragmentNotify : public Message {
   bufferlist basebl;
 
   MMDSFragmentNotify() : Message(MSG_MDS_FRAGMENTNOTIFY) {}
-  MMDSFragmentNotify(inodeno_t i, frag_t bf, int b) :
+  MMDSFragmentNotify(dirfrag_t df, int b) :
 	Message(MSG_MDS_FRAGMENTNOTIFY),
-    ino(i), basefrag(bf), bits(b) { }
+    ino(df.ino), basefrag(df.frag), bits(b) { }
 private:
-  ~MMDSFragmentNotify() {}
+  ~MMDSFragmentNotify() override {}
 
 public:  
-  const char *get_type_name() const { return "fragment_notify"; }
-  void print(ostream& o) const {
+  const char *get_type_name() const override { return "fragment_notify"; }
+  void print(ostream& o) const override {
     o << "fragment_notify(" << ino << "." << basefrag
       << " " << (int)bits << ")";
   }
 
-  void encode_payload(uint64_t features) {
+  void encode_payload(uint64_t features) override {
     ::encode(ino, payload);
     ::encode(basefrag, payload);
     ::encode(bits, payload);
     ::encode(basebl, payload);
   }
-  void decode_payload() {
+  void decode_payload() override {
     bufferlist::iterator p = payload.begin();
     ::decode(ino, p);
     ::decode(basefrag, p);

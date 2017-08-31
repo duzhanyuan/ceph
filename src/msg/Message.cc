@@ -14,7 +14,7 @@ using namespace std;
 #include "global/global_context.h"
 
 #include "Message.h"
-#include "Pipe.h"
+
 #include "messages/MPGStats.h"
 
 #include "messages/MGenericMessage.h"
@@ -57,16 +57,20 @@ using namespace std;
 
 #include "messages/MOSDBoot.h"
 #include "messages/MOSDAlive.h"
+#include "messages/MOSDBeacon.h"
 #include "messages/MOSDPGTemp.h"
 #include "messages/MOSDFailure.h"
 #include "messages/MOSDMarkMeDown.h"
+#include "messages/MOSDFull.h"
 #include "messages/MOSDPing.h"
 #include "messages/MOSDOp.h"
 #include "messages/MOSDOpReply.h"
-#include "messages/MOSDSubOp.h"
-#include "messages/MOSDSubOpReply.h"
+#include "messages/MOSDRepOp.h"
+#include "messages/MOSDRepOpReply.h"
 #include "messages/MOSDMap.h"
+#include "messages/MMonGetOSDMap.h"
 
+#include "messages/MOSDPGCreated.h"
 #include "messages/MOSDPGNotify.h"
 #include "messages/MOSDPGQuery.h"
 #include "messages/MOSDPGLog.h"
@@ -74,11 +78,17 @@ using namespace std;
 #include "messages/MOSDPGInfo.h"
 #include "messages/MOSDPGCreate.h"
 #include "messages/MOSDPGTrim.h"
-#include "messages/MOSDPGMissing.h"
 #include "messages/MOSDScrub.h"
+#include "messages/MOSDScrubReserve.h"
 #include "messages/MOSDRepScrub.h"
+#include "messages/MOSDRepScrubMap.h"
+#include "messages/MOSDForceRecovery.h"
 #include "messages/MOSDPGScan.h"
 #include "messages/MOSDPGBackfill.h"
+#include "messages/MOSDBackoff.h"
+#include "messages/MOSDPGBackfillRemove.h"
+#include "messages/MOSDPGRecoveryDelete.h"
+#include "messages/MOSDPGRecoveryDeleteReply.h"
 
 #include "messages/MRemoveSnaps.h"
 
@@ -87,7 +97,9 @@ using namespace std;
 #include "messages/MMonGetVersion.h"
 #include "messages/MMonGetVersionReply.h"
 #include "messages/MMonHealth.h"
-
+#include "messages/MMonHealthChecks.h"
+#include "messages/MMonMetadata.h"
+#include "messages/MDataPing.h"
 #include "messages/MAuth.h"
 #include "messages/MAuthReply.h"
 #include "messages/MMonSubscribe.h"
@@ -102,10 +114,13 @@ using namespace std;
 #include "messages/MClientCapRelease.h"
 #include "messages/MClientLease.h"
 #include "messages/MClientSnap.h"
+#include "messages/MClientQuota.h"
 
 #include "messages/MMDSSlaveRequest.h"
 
 #include "messages/MMDSMap.h"
+#include "messages/MFSMap.h"
+#include "messages/MFSMapUser.h"
 #include "messages/MMDSBeacon.h"
 #include "messages/MMDSLoadTargets.h"
 #include "messages/MMDSResolve.h"
@@ -135,6 +150,7 @@ using namespace std;
 
 #include "messages/MExportCaps.h"
 #include "messages/MExportCapsAck.h"
+#include "messages/MGatherCaps.h"
 
 
 #include "messages/MDentryUnlink.h"
@@ -148,6 +164,15 @@ using namespace std;
 #include "messages/MCacheExpire.h"
 #include "messages/MInodeFileCaps.h"
 
+#include "messages/MMgrBeacon.h"
+#include "messages/MMgrMap.h"
+#include "messages/MMgrDigest.h"
+#include "messages/MMgrReport.h"
+#include "messages/MMgrOpen.h"
+#include "messages/MMgrConfigure.h"
+#include "messages/MMonMgrReport.h"
+#include "messages/MServiceMap.h"
+
 #include "messages/MLock.h"
 
 #include "messages/MWatchNotify.h"
@@ -159,32 +184,47 @@ using namespace std;
 #include "messages/MOSDPGPushReply.h"
 #include "messages/MOSDPGPull.h"
 
+#include "messages/MOSDECSubOpWrite.h"
+#include "messages/MOSDECSubOpWriteReply.h"
+#include "messages/MOSDECSubOpRead.h"
+#include "messages/MOSDECSubOpReadReply.h"
+
+#include "messages/MOSDPGUpdateLogMissing.h"
+#include "messages/MOSDPGUpdateLogMissingReply.h"
+
 #define DEBUGLVL  10    // debug level of output
 
 #define dout_subsys ceph_subsys_ms
 
-void Message::encode(uint64_t features, bool datacrc)
+void Message::encode(uint64_t features, int crcflags)
 {
   // encode and copy out of *m
   if (empty_payload()) {
+    assert(middle.length() == 0);
     encode_payload(features);
+
+    if (byte_throttler) {
+      byte_throttler->take(payload.length() + middle.length());
+    }
 
     // if the encoder didn't specify past compatibility, we assume it
     // is incompatible.
     if (header.compat_version == 0)
       header.compat_version = header.version;
   }
-  calc_front_crc();
+  if (crcflags & MSG_CRC_HEADER)
+    calc_front_crc();
 
   // update envelope
   header.front_len = get_payload().length();
   header.middle_len = get_middle().length();
   header.data_len = get_data().length();
-  calc_header_crc();
+  if (crcflags & MSG_CRC_HEADER)
+    calc_header_crc();
 
   footer.flags = CEPH_MSG_FOOTER_COMPLETE;
 
-  if (datacrc) {
+  if (crcflags & MSG_CRC_DATA) {
     calc_data_crc();
 
 #ifdef ENCODE_DUMP
@@ -236,11 +276,14 @@ void Message::dump(Formatter *f) const
   f->dump_string("summary", ss.str());
 }
 
-Message *decode_message(CephContext *cct, ceph_msg_header& header, ceph_msg_footer& footer,
-			bufferlist& front, bufferlist& middle, bufferlist& data)
+Message *decode_message(CephContext *cct, int crcflags,
+			ceph_msg_header& header,
+			ceph_msg_footer& footer,
+			bufferlist& front, bufferlist& middle,
+			bufferlist& data, Connection* conn)
 {
   // verify crc
-  if (!cct || !cct->_conf->ms_nocrc) {
+  if (crcflags & MSG_CRC_HEADER) {
     __u32 front_crc = front.crc32c(0);
     __u32 middle_crc = middle.crc32c(0);
 
@@ -262,7 +305,8 @@ Message *decode_message(CephContext *cct, ceph_msg_header& header, ceph_msg_foot
       }
       return 0;
     }
-
+  }
+  if (crcflags & MSG_CRC_DATA) {
     if ((footer.flags & CEPH_MSG_FOOTER_NOCRC) == 0) {
       __u32 data_crc = data.crc32c(0);
       if (data_crc != footer.data_crc) {
@@ -275,7 +319,7 @@ Message *decode_message(CephContext *cct, ceph_msg_header& header, ceph_msg_foot
 	return 0;
       }
     }
-  } 
+  }
 
   // make message
   Message *m = 0;
@@ -357,6 +401,9 @@ Message *decode_message(CephContext *cct, ceph_msg_header& header, ceph_msg_foot
   case MSG_OSD_RECOVERY_RESERVE:
     m = new MRecoveryReserve;
     break;
+  case MSG_OSD_FORCE_RECOVERY:
+    m = new MOSDForceRecovery;
+    break;
 
   case MSG_ROUTE:
     m = new MRoute;
@@ -371,11 +418,17 @@ Message *decode_message(CephContext *cct, ceph_msg_header& header, ceph_msg_foot
   case CEPH_MSG_MON_GET_MAP:
     m = new MMonGetMap;
     break;
+  case CEPH_MSG_MON_GET_OSDMAP:
+    m = new MMonGetOSDMap;
+    break;
   case CEPH_MSG_MON_GET_VERSION:
     m = new MMonGetVersion();
     break;
   case CEPH_MSG_MON_GET_VERSION_REPLY:
     m = new MMonGetVersionReply();
+    break;
+  case CEPH_MSG_MON_METADATA:
+    m = new MMonMetadata();
     break;
 
   case MSG_OSD_BOOT:
@@ -383,6 +436,9 @@ Message *decode_message(CephContext *cct, ceph_msg_header& header, ceph_msg_foot
     break;
   case MSG_OSD_ALIVE:
     m = new MOSDAlive();
+    break;
+  case MSG_OSD_BEACON:
+    m = new MOSDBeacon();
     break;
   case MSG_OSD_PGTEMP:
     m = new MOSDPGTemp;
@@ -393,6 +449,9 @@ Message *decode_message(CephContext *cct, ceph_msg_header& header, ceph_msg_foot
   case MSG_OSD_MARK_ME_DOWN:
     m = new MOSDMarkMeDown();
     break;
+  case MSG_OSD_FULL:
+    m = new MOSDFull();
+    break;
   case MSG_OSD_PING:
     m = new MOSDPing();
     break;
@@ -402,11 +461,23 @@ Message *decode_message(CephContext *cct, ceph_msg_header& header, ceph_msg_foot
   case CEPH_MSG_OSD_OPREPLY:
     m = new MOSDOpReply();
     break;
-  case MSG_OSD_SUBOP:
-    m = new MOSDSubOp();
+  case MSG_OSD_REPOP:
+    m = new MOSDRepOp();
     break;
-  case MSG_OSD_SUBOPREPLY:
-    m = new MOSDSubOpReply();
+  case MSG_OSD_REPOPREPLY:
+    m = new MOSDRepOpReply();
+    break;
+  case MSG_OSD_PG_CREATED:
+    m = new MOSDPGCreated();
+    break;
+  case MSG_OSD_PG_UPDATE_LOG_MISSING:
+    m = new MOSDPGUpdateLogMissing();
+    break;
+  case MSG_OSD_PG_UPDATE_LOG_MISSING_REPLY:
+    m = new MOSDPGUpdateLogMissingReply();
+    break;
+  case CEPH_MSG_OSD_BACKOFF:
+    m = new MOSDBackoff;
     break;
 
   case CEPH_MSG_OSD_MAP:
@@ -442,20 +513,26 @@ Message *decode_message(CephContext *cct, ceph_msg_header& header, ceph_msg_foot
   case MSG_OSD_SCRUB:
     m = new MOSDScrub;
     break;
+  case MSG_OSD_SCRUB_RESERVE:
+    m = new MOSDScrubReserve;
+    break;
   case MSG_REMOVE_SNAPS:
     m = new MRemoveSnaps;
     break;
-  case MSG_OSD_PG_MISSING:
-    m = new MOSDPGMissing;
-    break;
   case MSG_OSD_REP_SCRUB:
     m = new MOSDRepScrub;
+    break;
+  case MSG_OSD_REP_SCRUBMAP:
+    m = new MOSDRepScrubMap;
     break;
   case MSG_OSD_PG_SCAN:
     m = new MOSDPGScan;
     break;
   case MSG_OSD_PG_BACKFILL:
     m = new MOSDPGBackfill;
+    break;
+  case MSG_OSD_PG_BACKFILL_REMOVE:
+    m = new MOSDPGBackfillRemove;
     break;
   case MSG_OSD_PG_PUSH:
     m = new MOSDPGPush;
@@ -465,6 +542,24 @@ Message *decode_message(CephContext *cct, ceph_msg_header& header, ceph_msg_foot
     break;
   case MSG_OSD_PG_PUSH_REPLY:
     m = new MOSDPGPushReply;
+    break;
+  case MSG_OSD_PG_RECOVERY_DELETE:
+    m = new MOSDPGRecoveryDelete;
+    break;
+  case MSG_OSD_PG_RECOVERY_DELETE_REPLY:
+    m = new MOSDPGRecoveryDeleteReply;
+    break;
+  case MSG_OSD_EC_WRITE:
+    m = new MOSDECSubOpWrite;
+    break;
+  case MSG_OSD_EC_WRITE_REPLY:
+    m = new MOSDECSubOpWriteReply;
+    break;
+  case MSG_OSD_EC_READ:
+    m = new MOSDECSubOpRead;
+    break;
+  case MSG_OSD_EC_READ_REPLY:
+    m = new MOSDECSubOpReadReply;
     break;
    // auth
   case CEPH_MSG_AUTH:
@@ -512,6 +607,9 @@ Message *decode_message(CephContext *cct, ceph_msg_header& header, ceph_msg_foot
   case CEPH_MSG_CLIENT_SNAP:
     m = new MClientSnap;
     break;
+  case CEPH_MSG_CLIENT_QUOTA:
+    m = new MClientQuota;
+    break;
 
     // mds
   case MSG_MDS_SLAVE_REQUEST:
@@ -520,6 +618,12 @@ Message *decode_message(CephContext *cct, ceph_msg_header& header, ceph_msg_foot
 
   case CEPH_MSG_MDS_MAP:
     m = new MMDSMap;
+    break;
+  case CEPH_MSG_FS_MAP:
+    m = new MFSMap;
+    break;
+  case CEPH_MSG_FS_MAP_USER:
+    m = new MFSMapUser;
     break;
   case MSG_MDS_BEACON:
     m = new MMDSBeacon;
@@ -536,12 +640,7 @@ Message *decode_message(CephContext *cct, ceph_msg_header& header, ceph_msg_foot
   case MSG_MDS_CACHEREJOIN:
     m = new MMDSCacheRejoin;
 	break;
-	/*
-  case MSG_MDS_CACHEREJOINACK:
-	m = new MMDSCacheRejoinAck;
-	break;
-	*/
-
+  
   case MSG_MDS_DIRUPDATE:
     m = new MDirUpdate();
     break;
@@ -613,6 +712,9 @@ Message *decode_message(CephContext *cct, ceph_msg_header& header, ceph_msg_foot
   case MSG_MDS_EXPORTCAPSACK:
     m = new MExportCapsAck;
     break;
+  case MSG_MDS_GATHERCAPS:
+    m = new MGatherCaps;
+    break;
 
 
   case MSG_MDS_DENTRYUNLINK:
@@ -647,6 +749,38 @@ Message *decode_message(CephContext *cct, ceph_msg_header& header, ceph_msg_foot
     m = new MLock();
     break;
 
+  case MSG_MGR_BEACON:
+    m = new MMgrBeacon();
+    break;
+
+  case MSG_MON_MGR_REPORT:
+    m = new MMonMgrReport();
+    break;
+
+  case MSG_SERVICE_MAP:
+    m = new MServiceMap();
+    break;
+
+  case MSG_MGR_MAP:
+    m = new MMgrMap();
+    break;
+
+  case MSG_MGR_DIGEST:
+    m = new MMgrDigest();
+    break;
+
+  case MSG_MGR_OPEN:
+    m = new MMgrOpen();
+    break;
+
+  case MSG_MGR_REPORT:
+    m = new MMgrReport();
+    break;
+
+  case MSG_MGR_CONFIGURE:
+    m = new MMgrConfigure();
+    break;
+
   case MSG_TIMECHECK:
     m = new MTimeCheck();
     break;
@@ -655,6 +789,15 @@ Message *decode_message(CephContext *cct, ceph_msg_header& header, ceph_msg_foot
     m = new MMonHealth();
     break;
 
+  case MSG_MON_HEALTH_CHECKS:
+    m = new MMonHealthChecks();
+    break;
+
+#if defined(HAVE_XIO)
+  case MSG_DATA_PING:
+    m = new MDataPing();
+    break;
+#endif
     // -- simple messages without payload --
 
   case CEPH_MSG_SHUTDOWN:
@@ -665,10 +808,12 @@ Message *decode_message(CephContext *cct, ceph_msg_header& header, ceph_msg_foot
     if (cct) {
       ldout(cct, 0) << "can't decode unknown message type " << type << " MSG_AUTH=" << CEPH_MSG_AUTH << dendl;
       if (cct->_conf->ms_die_on_bad_msg)
-	assert(0);
+	ceph_abort();
     }
     return 0;
   }
+
+  m->set_cct(cct);
 
   // m->header.version, if non-zero, should be populated with the
   // newest version of the encoding the code supports.  If set, check
@@ -681,12 +826,13 @@ Message *decode_message(CephContext *cct, ceph_msg_header& header, ceph_msg_foot
 		    << " because compat_version " << header.compat_version
 		    << " > supported version " << m->get_header().version << dendl;
       if (cct->_conf->ms_die_on_bad_msg)
-	assert(0);
+	ceph_abort();
     }
     m->put();
     return 0;
   }
-  
+
+  m->set_connection(conn);
   m->set_header(header);
   m->set_footer(footer);
   m->set_payload(front);
@@ -701,11 +847,11 @@ Message *decode_message(CephContext *cct, ceph_msg_header& header, ceph_msg_foot
       lderr(cct) << "failed to decode message of type " << type
 		 << " v" << header.version
 		 << ": " << e.what() << dendl;
-      ldout(cct, 30) << "dump: \n";
+      ldout(cct, cct->_conf->ms_dump_corrupt_message_level) << "dump: \n";
       m->get_payload().hexdump(*_dout);
       *_dout << dendl;
       if (cct->_conf->ms_die_on_bad_msg)
-	assert(0);
+	ceph_abort();
     }
     m->put();
     return 0;
@@ -713,6 +859,42 @@ Message *decode_message(CephContext *cct, ceph_msg_header& header, ceph_msg_foot
 
   // done!
   return m;
+}
+
+void Message::encode_trace(bufferlist &bl, uint64_t features) const
+{
+  auto p = trace.get_info();
+  static const blkin_trace_info empty = { 0, 0, 0 };
+  if (!p) {
+    p = &empty;
+  }
+  ::encode(*p, bl);
+}
+
+void Message::decode_trace(bufferlist::iterator &p, bool create)
+{
+  blkin_trace_info info = {};
+  ::decode(info, p);
+
+#ifdef WITH_BLKIN
+  if (!connection)
+    return;
+
+  const auto msgr = connection->get_messenger();
+  const auto endpoint = msgr->get_trace_endpoint();
+  if (info.trace_id) {
+    trace.init(get_type_name(), endpoint, &info, true);
+    trace.event("decoded trace");
+  } else if (create || (msgr->get_myname().is_osd() &&
+                        msgr->cct->_conf->osd_blkin_trace_all)) {
+    // create a trace even if we didn't get one on the wire
+    trace.init(get_type_name(), endpoint);
+    trace.event("created trace");
+  }
+  trace.keyval("tid", get_tid());
+  trace.keyval("entity type", get_source().type_str());
+  trace.keyval("entity num", get_source().num());
+#endif
 }
 
 
@@ -727,7 +909,7 @@ void encode_message(Message *msg, uint64_t features, bufferlist& payload)
   bufferlist front, middle, data;
   ceph_msg_footer_old old_footer;
   ceph_msg_footer footer;
-  msg->encode(features, true);
+  msg->encode(features, MSG_CRC_ALL);
   ::encode(msg->get_header(), payload);
 
   // Here's where we switch to the old footer format.  PLR
@@ -749,7 +931,7 @@ void encode_message(Message *msg, uint64_t features, bufferlist& payload)
 // We've slipped in a 0 signature at this point, so any signature checking after this will
 // fail.  PLR
 
-Message *decode_message(CephContext *cct, bufferlist::iterator& p)
+Message *decode_message(CephContext *cct, int crcflags, bufferlist::iterator& p)
 {
   ceph_msg_header h;
   ceph_msg_footer_old fo;
@@ -765,6 +947,6 @@ Message *decode_message(CephContext *cct, bufferlist::iterator& p)
   ::decode(fr, p);
   ::decode(mi, p);
   ::decode(da, p);
-  return decode_message(cct, h, f, fr, mi, da);
+  return decode_message(cct, crcflags, h, f, fr, mi, da, nullptr);
 }
 

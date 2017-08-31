@@ -12,10 +12,16 @@
 #ifndef CEPH_EXTATTR_H
 #define CEPH_EXTATTR_H
 
-#include <sys/types.h>
 
 #ifdef __cplusplus
 extern "C" {
+#endif
+
+// Almost everyone defines ENOATTR, except for Linux,
+// which does #define ENOATTR ENODATA.  It seems that occasionally that
+// isn't defined, though, so let's make sure.
+#ifndef ENOATTR
+# define ENOATTR ENODATA
 #endif
 
 int ceph_os_setxattr(const char *path, const char *name,

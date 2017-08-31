@@ -15,18 +15,16 @@
 #ifndef CEPH_KEYRING_H
 #define CEPH_KEYRING_H
 
-#include "common/config.h"
-
-#include "auth/Crypto.h"
 #include "auth/Auth.h"
 
+class CephContext;
 
 class KeyRing : public KeyStore {
   map<EntityName, EntityAuth> keys;
 
   int set_modifier(const char *type, const char *val, EntityName& name, map<string, bufferlist>& caps);
-  void decode_plaintext(bufferlist::iterator& bl);
 public:
+  void decode_plaintext(bufferlist::iterator& bl);
   /* Create a KeyRing from a Ceph context.
    * We will use the configuration stored inside the context. */
   int from_ceph_context(CephContext *cct);
@@ -47,7 +45,7 @@ public:
     a = k->second;
     return true;
   }
-  bool get_secret(const EntityName& name, CryptoKey& secret) const {
+  bool get_secret(const EntityName& name, CryptoKey& secret) const override {
     map<EntityName, EntityAuth>::const_iterator k = keys.find(name);
     if (k == keys.end())
       return false;
@@ -55,7 +53,7 @@ public:
     return true;
   }
   bool get_service_secret(uint32_t service_id, uint64_t secret_id,
-			  CryptoKey& secret) const {
+			  CryptoKey& secret) const override {
     return false;
   }
   bool get_caps(const EntityName& name,

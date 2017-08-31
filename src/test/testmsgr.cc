@@ -28,10 +28,6 @@ using namespace std;
 #include "global/global_init.h"
 #include "common/ceph_argparse.h"
 
-#ifndef DARWIN
-#include <envz.h>
-#endif // DARWIN
-
 #include <sys/types.h>
 #include <fcntl.h>
 
@@ -39,7 +35,7 @@ using namespace std;
 
 Messenger *messenger = 0;
 
-Mutex lock("mylock");
+Mutex test_lock("mylock");
 Cond cond;
 
 uint64_t received = 0;
@@ -55,10 +51,10 @@ private:
 
     //cerr << "got ping from " << m->get_source() << std::endl;
     dout(0) << "got ping from " << m->get_source() << dendl;
-    lock.Lock();
+    test_lock.Lock();
     ++received;
     cond.Signal();
-    lock.Unlock();
+    test_lock.Unlock();
 
     m->put();
     return true;
@@ -66,6 +62,7 @@ private:
 
   bool ms_handle_reset(Connection *con) { return false; }
   void ms_handle_remote_reset(Connection *con) {}
+  bool ms_handle_refused(Connection *con) { return false; }
 
 } dispatcher;
 
@@ -76,7 +73,8 @@ int main(int argc, const char **argv, const char *envp[]) {
   argv_to_vec(argc, argv, args);
   env_to_vec(args);
 
-  global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT, CODE_ENVIRONMENT_UTILITY, 0);
+  auto cct = global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT,
+			 CODE_ENVIRONMENT_UTILITY, 0);
   common_init_finish(g_ceph_context);
 
   dout(0) << "i am mon " << args[0] << dendl;
@@ -94,7 +92,9 @@ int main(int argc, const char **argv, const char *envp[]) {
   std::string sss(ss.str());
   g_ceph_context->_conf->set_val("public_addr", sss.c_str());
   g_ceph_context->_conf->apply_changes(NULL);
+  std::string public_msgr_type = g_conf->ms_public_type.empty() ? g_conf->get_val<std::string>("ms_type") : g_conf->ms_public_type;
   Messenger *rank = Messenger::create(g_ceph_context,
+				      public_msgr_type,
 				      entity_name_t::MON(whoami), "tester",
 				      getpid());
   int err = rank->bind(g_ceph_context->_conf->public_addr);
@@ -112,13 +112,13 @@ int main(int argc, const char **argv, const char *envp[]) {
   if (whoami == 0)
     isend = 100;
 
-  lock.Lock();
+  test_lock.Lock();
   uint64_t sent = 0;
   while (1) {
     while (received + isend <= sent) {
       //cerr << "wait r " << received << " s " << sent << " is " << isend << std::endl;
       dout(0) << "wait r " << received << " s " << sent << " is " << isend << dendl;
-      cond.Wait(lock);
+      cond.Wait(test_lock);
     }
 
     int t = rand() % mc.get_num_mon();
@@ -135,7 +135,7 @@ int main(int argc, const char **argv, const char *envp[]) {
     messenger->send_message(new MPing, mc.get_mon_inst(t));
     cerr << isend << "\t" << ++sent << "\t" << received << "\r";
   }
-  lock.Unlock();
+  test_lock.Unlock();
 
   // wait for messenger to finish
   rank->wait();

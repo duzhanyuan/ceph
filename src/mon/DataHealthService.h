@@ -17,15 +17,14 @@
 #include <errno.h>
 
 #include "include/types.h"
-#include "include/Context.h"
 #include "mon/mon_types.h"
-#include "mon/QuorumService.h"
 #include "mon/HealthService.h"
-#include "common/Formatter.h"
 #include "common/config.h"
 #include "global/signal_handler.h"
 
 struct MMonHealth;
+namespace ceph { class Formatter; }
+
 
 class DataHealthService :
   public HealthService
@@ -33,7 +32,7 @@ class DataHealthService :
   map<entity_inst_t,DataStats> stats;
   int last_warned_percent;
 
-  void handle_tell(MMonHealth *m);
+  void handle_tell(MonOpRequestRef op);
   int update_store_stats(DataStats &ours);
   int update_stats();
   void share_stats();
@@ -44,17 +43,13 @@ class DataHealthService :
   }
 
 protected:
-  virtual void service_tick();
-  virtual bool service_dispatch(Message *m) {
-    assert(0 == "We should never reach this; only the function below");
-    return false;
-  }
-  virtual bool service_dispatch(MMonHealth *m);
-  virtual void service_shutdown() { }
+  void service_tick() override;
+  bool service_dispatch_op(MonOpRequestRef op) override;
+  void service_shutdown() override { }
 
-  virtual void start_epoch();
-  virtual void finish_epoch() { }
-  virtual void cleanup() { }
+  void start_epoch() override;
+  void finish_epoch() override { }
+  void cleanup() override { }
 
 public:
   DataHealthService(Monitor *m) :
@@ -63,21 +58,22 @@ public:
   {
     set_update_period(g_conf->mon_health_data_update_interval);
   }
-  virtual ~DataHealthService() { }
+  ~DataHealthService() override { }
 
-  virtual void init() {
+  void init() override {
     generic_dout(20) << "data_health " << __func__ << dendl;
     start_tick();
   }
 
-  virtual health_status_t get_health(Formatter *f,
-                          list<pair<health_status_t,string> > *detail);
+  void get_health(
+    list<pair<health_status_t,string> >& summary,
+    list<pair<health_status_t,string> > *detail) override;
 
-  virtual int get_type() {
+  int get_type() override {
     return HealthService::SERVICE_HEALTH_DATA;
   }
 
-  virtual string get_name() const {
+  string get_name() const override {
     return "data_health";
   }
 };

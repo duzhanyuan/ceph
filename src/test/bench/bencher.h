@@ -12,10 +12,10 @@
 #include "common/Cond.h"
 #include "common/Thread.h"
 
-class OnWriteApplied;
-class OnWriteCommit;
-class OnReadComplete;
-class Clenaup;
+struct OnWriteApplied;
+struct OnWriteCommit;
+struct OnReadComplete;
+struct Cleanup;
 
 class Bencher : public Thread {
 public:
@@ -27,7 +27,7 @@ public:
 private:
   boost::scoped_ptr<
     Distribution<boost::tuple<std::string,uint64_t,uint64_t, OpType> > > op_dist;
-  std::tr1::shared_ptr<StatCollector> stat_collector;
+  ceph::shared_ptr<StatCollector> stat_collector;
   boost::scoped_ptr<Backend> backend;
   const uint64_t max_in_flight;
   const uint64_t max_duration;
@@ -42,7 +42,7 @@ private:
 public:
   Bencher(
     Distribution<boost::tuple<std::string, uint64_t, uint64_t, OpType> > *op_gen,
-    std::tr1::shared_ptr<StatCollector> stat_collector,
+    ceph::shared_ptr<StatCollector> stat_collector,
     Backend *backend,
     uint64_t max_in_flight,
     uint64_t max_duration,
@@ -101,14 +101,14 @@ public:
     );
 
   void run_bench();
-  void *entry() {
+  void *entry() override {
     run_bench();
     return 0;
   }
-  friend class OnWriteApplied;
-  friend class OnWriteCommit;
-  friend class OnReadComplete;
-  friend class Cleanup;
+  friend struct OnWriteApplied;
+  friend struct OnWriteCommit;
+  friend struct OnReadComplete;
+  friend struct Cleanup;
 };
 
 class SequentialLoad :
@@ -131,11 +131,11 @@ public:
       op_dist(op_dist) {}
 
   boost::tuple<string, uint64_t, uint64_t, Bencher::OpType>
-  operator()() {
+  operator()() override {
     boost::tuple<string, uint64_t, uint64_t, Bencher::OpType> ret =
       boost::make_tuple(*object_pos, cur_pos, length, (*op_dist)());
     cur_pos += length;
-    if (cur_pos > size) {
+    if (cur_pos >= size) {
       cur_pos = 0;
       ++object_pos;
     }

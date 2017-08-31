@@ -1,14 +1,10 @@
-
 #ifdef __KERNEL__
 # include <linux/slab.h>
+# include <linux/crush/crush.h>
 #else
-# include <stdlib.h>
-# include <assert.h>
-# define kfree(x) do { if (x) free(x); } while (0)
-# define BUG_ON(x) assert(!(x))
+# include "crush_compat.h"
+# include "crush.h"
 #endif
-
-#include "crush.h"
 
 const char *crush_bucket_alg_name(int alg)
 {
@@ -17,14 +13,15 @@ const char *crush_bucket_alg_name(int alg)
 	case CRUSH_BUCKET_LIST: return "list";
 	case CRUSH_BUCKET_TREE: return "tree";
 	case CRUSH_BUCKET_STRAW: return "straw";
+	case CRUSH_BUCKET_STRAW2: return "straw2";
 	default: return "unknown";
 	}
 }
 
 /**
  * crush_get_bucket_item_weight - Get weight of an item in given bucket
- * @param b bucket pointer
- * @param p item index in bucket
+ * @b: bucket pointer
+ * @p: item index in bucket
  */
 int crush_get_bucket_item_weight(const struct crush_bucket *b, int p)
 {
@@ -40,13 +37,14 @@ int crush_get_bucket_item_weight(const struct crush_bucket *b, int p)
 		return ((struct crush_bucket_tree *)b)->node_weights[crush_calc_tree_node(p)];
 	case CRUSH_BUCKET_STRAW:
 		return ((struct crush_bucket_straw *)b)->item_weights[p];
+	case CRUSH_BUCKET_STRAW2:
+		return ((struct crush_bucket_straw2 *)b)->item_weights[p];
 	}
 	return 0;
 }
 
 void crush_destroy_bucket_uniform(struct crush_bucket_uniform *b)
 {
-	kfree(b->h.perm);
 	kfree(b->h.items);
 	kfree(b);
 }
@@ -55,14 +53,12 @@ void crush_destroy_bucket_list(struct crush_bucket_list *b)
 {
 	kfree(b->item_weights);
 	kfree(b->sum_weights);
-	kfree(b->h.perm);
 	kfree(b->h.items);
 	kfree(b);
 }
 
 void crush_destroy_bucket_tree(struct crush_bucket_tree *b)
 {
-	kfree(b->h.perm);
 	kfree(b->h.items);
 	kfree(b->node_weights);
 	kfree(b);
@@ -72,7 +68,13 @@ void crush_destroy_bucket_straw(struct crush_bucket_straw *b)
 {
 	kfree(b->straws);
 	kfree(b->item_weights);
-	kfree(b->h.perm);
+	kfree(b->h.items);
+	kfree(b);
+}
+
+void crush_destroy_bucket_straw2(struct crush_bucket_straw2 *b)
+{
+	kfree(b->item_weights);
 	kfree(b->h.items);
 	kfree(b);
 }
@@ -92,12 +94,15 @@ void crush_destroy_bucket(struct crush_bucket *b)
 	case CRUSH_BUCKET_STRAW:
 		crush_destroy_bucket_straw((struct crush_bucket_straw *)b);
 		break;
+	case CRUSH_BUCKET_STRAW2:
+		crush_destroy_bucket_straw2((struct crush_bucket_straw2 *)b);
+		break;
 	}
 }
 
 /**
  * crush_destroy - Destroy a crush_map
- * @param map crush_map pointer
+ * @map: crush_map pointer
  */
 void crush_destroy(struct crush_map *map)
 {
@@ -120,28 +125,13 @@ void crush_destroy(struct crush_map *map)
 		kfree(map->rules);
 	}
 
+#ifndef __KERNEL__
 	kfree(map->choose_tries);
+#endif
 	kfree(map);
 }
 
 void crush_destroy_rule(struct crush_rule *rule)
 {
 	kfree(rule);
-}
-
-// methods to check for safe arithmetic operations
-int crush_addition_is_unsafe(__u32 a, __u32 b)
-{
-  if ((((__u32)(-1)) - b) < a)
-    return 1;
-  else
-    return 0;
-}
-
-int crush_multiplication_is_unsafe(__u32  a, __u32 b)
-{
-  if ((((__u32)(-1)) / b) < a)
-    return 1;
-  else
-    return 0;
 }

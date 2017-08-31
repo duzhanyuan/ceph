@@ -55,7 +55,7 @@ OSD::require_same_or_newer map checks that the current OSDMap is at least
 as new as the map epoch indicated on the message.  If not, the message is
 queued in OSD::waiting_for_osdmap via OSD::wait_for_new_map.  Note, this
 cannot violate the above conditions since any two messages will be queued
-in order of receipt and if a message is recieved with epoch e0, a later message
+in order of receipt and if a message is received with epoch e0, a later message
 from the same source must be at epoch at least e0.  Note that two PGs from
 the same OSD count for these purposes as different sources for single PG
 messages.  That is, messages from different PGs may be reordered.
@@ -66,7 +66,7 @@ MOSDPGOps follow the following process:
   1. OSD::handle_op: validates permissions and crush mapping.
      discard the request if they are not connected and the client cannot get the reply ( See OSD::op_is_discardable )
      See OSDService::handle_misdirected_op
-     See OSD::op_has_sufficient_caps
+     See PG::op_has_sufficient_caps
      See OSD::require_same_or_newer_map
   2. OSD::enqueue_op
 
@@ -97,7 +97,7 @@ If these conditions are not met, the op is either discarded or queued for later 
 CEPH_MSG_OSD_OP processing
 --------------------------
 
-ReplicatedPG::do_op handles CEPH_MSG_OSD_OP op and will queue it
+PrimaryLogPG::do_op handles CEPH_MSG_OSD_OP op and will queue it
 
   1. in wait_for_all_missing if it is a CEPH_OSD_OP_PGLS for a designated snapid and some object updates are still missing
   2. in waiting_for_active if the op may write but the scrubber is working
@@ -118,7 +118,7 @@ Peering messages are tagged with two epochs:
 
 These are the same in cases where there was no triggering message.  We discard
 a peering message if the message's query_epoch if the PG in question has entered
-a new epoch (See PG::old_peering_event, PG::queue_peering_event).  Notifies,
+a new epoch (See PG::old_peering_evt, PG::queue_peering_event).  Notifies,
 infos, notifies, and logs are all handled as PG::RecoveryMachine events and
 are wrapped by PG::queue_* by PG::CephPeeringEvts, which include the created
 state machine event along with epoch_sent and query_epoch in order to

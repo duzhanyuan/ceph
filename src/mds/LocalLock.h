@@ -27,12 +27,12 @@ public:
     set_state(LOCK_LOCK); // always.
   }
 
-  bool is_locallock() const {
+  bool is_locallock() const override {
     return true;
   }
 
   bool can_xlock_local() const {
-    return !is_wrlocked() && (get_xlock_by() == 0);
+    return !is_wrlocked() && (get_xlock_by() == MutationRef());
   }
 
   bool can_wrlock() const {
@@ -52,7 +52,7 @@ public:
     return last_wrlock_client;
   }
   
-  virtual void print(ostream& out) const {
+  void print(ostream& out) const override {
     out << "(";
     _print(out);
     if (last_wrlock_client >= 0)

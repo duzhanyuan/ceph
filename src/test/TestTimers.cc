@@ -16,7 +16,7 @@ class TestContext;
 
 namespace
 {
-  int array[MAX_TEST_CONTEXTS];
+  int test_array[MAX_TEST_CONTEXTS];
   int array_idx;
   TestContext* test_contexts[MAX_TEST_CONTEXTS];
 
@@ -26,20 +26,20 @@ namespace
 class TestContext : public Context
 {
 public:
-  TestContext(int num_)
+  explicit TestContext(int num_)
     : num(num_)
   {
   }
 
-  virtual void finish(int r)
+  void finish(int r) override
   {
     array_lock.Lock();
     cout << "TestContext " << num << std::endl;
-    array[array_idx++] = num;
+    test_array[array_idx++] = num;
     array_lock.Unlock();
   }
 
-  virtual ~TestContext()
+  ~TestContext() override
   {
   }
 
@@ -50,20 +50,20 @@ protected:
 class StrictOrderTestContext : public TestContext
 {
 public:
-  StrictOrderTestContext (int num_)
+  explicit StrictOrderTestContext (int num_)
     : TestContext(num_)
   {
   }
 
-  virtual void finish(int r)
+  void finish(int r) override
   {
     array_lock.Lock();
     cout << "StrictOrderTestContext " << num << std::endl;
-    array[num] = num;
+    test_array[num] = num;
     array_lock.Unlock();
   }
 
-  virtual ~StrictOrderTestContext()
+  ~StrictOrderTestContext() override
   {
   }
 };
@@ -79,7 +79,7 @@ template <typename T>
 static int basic_timer_test(T &timer, Mutex *lock)
 {
   int ret = 0;
-  memset(&array, 0, sizeof(array));
+  memset(&test_array, 0, sizeof(test_array));
   array_idx = 0;
   memset(&test_contexts, 0, sizeof(test_contexts));
 
@@ -94,7 +94,7 @@ static int basic_timer_test(T &timer, Mutex *lock)
     if (lock)
       lock->Lock();
     utime_t inc(2 * i, 0);
-    utime_t t = ceph_clock_now(g_ceph_context) + inc;
+    utime_t t = ceph_clock_now() + inc;
     timer.add_event_at(t, test_contexts[i]);
     if (lock)
       lock->Unlock();
@@ -109,10 +109,10 @@ static int basic_timer_test(T &timer, Mutex *lock)
   } while (!done);
 
   for (int i = 0; i < MAX_TEST_CONTEXTS; ++i) {
-    if (array[i] != i) {
+    if (test_array[i] != i) {
       ret = 1;
-      cout << "error: expected array[" << i << "] = " << i
-	   << "; got " << array[i] << " instead." << std::endl;
+      cout << "error: expected test_array[" << i << "] = " << i
+	   << "; got " << test_array[i] << " instead." << std::endl;
     }
   }
 
@@ -122,7 +122,7 @@ static int basic_timer_test(T &timer, Mutex *lock)
 static int test_out_of_order_insertion(SafeTimer &timer, Mutex *lock)
 {
   int ret = 0;
-  memset(&array, 0, sizeof(array));
+  memset(&test_array, 0, sizeof(test_array));
   array_idx = 0;
   memset(&test_contexts, 0, sizeof(test_contexts));
 
@@ -133,7 +133,7 @@ static int test_out_of_order_insertion(SafeTimer &timer, Mutex *lock)
 
   {
     utime_t inc(100, 0);
-    utime_t t = ceph_clock_now(g_ceph_context) + inc;
+    utime_t t = ceph_clock_now() + inc;
     lock->Lock();
     timer.add_event_at(t, test_contexts[0]);
     lock->Unlock();
@@ -141,7 +141,7 @@ static int test_out_of_order_insertion(SafeTimer &timer, Mutex *lock)
 
   {
     utime_t inc(2, 0);
-    utime_t t = ceph_clock_now(g_ceph_context) + inc;
+    utime_t t = ceph_clock_now() + inc;
     lock->Lock();
     timer.add_event_at(t, test_contexts[1]);
     lock->Unlock();
@@ -151,7 +151,7 @@ static int test_out_of_order_insertion(SafeTimer &timer, Mutex *lock)
   for (; secs < 100 ; ++secs) {
     sleep(1);
     array_lock.Lock();
-    int a = array[1];
+    int a = test_array[1];
     array_lock.Unlock();
     if (a == 1)
       break;
@@ -159,8 +159,8 @@ static int test_out_of_order_insertion(SafeTimer &timer, Mutex *lock)
 
   if (secs == 100) {
     ret = 1;
-    cout << "error: expected array[" << 1 << "] = " << 1
-	 << "; got " << array[1] << " instead." << std::endl;
+    cout << "error: expected test_array[" << 1 << "] = " << 1
+	 << "; got " << test_array[1] << " instead." << std::endl;
   }
 
   return ret;
@@ -171,7 +171,7 @@ static int safe_timer_cancel_all_test(SafeTimer &safe_timer, Mutex& safe_timer_l
   cout << __PRETTY_FUNCTION__ << std::endl;
 
   int ret = 0;
-  memset(&array, 0, sizeof(array));
+  memset(&test_array, 0, sizeof(test_array));
   array_idx = 0;
   memset(&test_contexts, 0, sizeof(test_contexts));
 
@@ -182,7 +182,7 @@ static int safe_timer_cancel_all_test(SafeTimer &safe_timer, Mutex& safe_timer_l
   safe_timer_lock.Lock();
   for (int i = 0; i < MAX_TEST_CONTEXTS; ++i) {
     utime_t inc(4 * i, 0);
-    utime_t t = ceph_clock_now(g_ceph_context) + inc;
+    utime_t t = ceph_clock_now() + inc;
     safe_timer.add_event_at(t, test_contexts[i]);
   }
   safe_timer_lock.Unlock();
@@ -194,10 +194,10 @@ static int safe_timer_cancel_all_test(SafeTimer &safe_timer, Mutex& safe_timer_l
   safe_timer_lock.Unlock();
 
   for (int i = 0; i < array_idx; ++i) {
-    if (array[i] != i) {
+    if (test_array[i] != i) {
       ret = 1;
-      cout << "error: expected array[" << i << "] = " << i
-	   << "; got " << array[i] << " instead." << std::endl;
+      cout << "error: expected test_array[" << i << "] = " << i
+	   << "; got " << test_array[i] << " instead." << std::endl;
     }
   }
 
@@ -209,7 +209,7 @@ static int safe_timer_cancellation_test(SafeTimer &safe_timer, Mutex& safe_timer
   cout << __PRETTY_FUNCTION__ << std::endl;
 
   int ret = 0;
-  memset(&array, 0, sizeof(array));
+  memset(&test_array, 0, sizeof(test_array));
   array_idx = 0;
   memset(&test_contexts, 0, sizeof(test_contexts));
 
@@ -220,7 +220,7 @@ static int safe_timer_cancellation_test(SafeTimer &safe_timer, Mutex& safe_timer
   safe_timer_lock.Lock();
   for (int i = 0; i < MAX_TEST_CONTEXTS; ++i) {
     utime_t inc(4 * i, 0);
-    utime_t t = ceph_clock_now(g_ceph_context) + inc;
+    utime_t t = ceph_clock_now() + inc;
     safe_timer.add_event_at(t, test_contexts[i]);
   }
   safe_timer_lock.Unlock();
@@ -239,10 +239,10 @@ static int safe_timer_cancellation_test(SafeTimer &safe_timer, Mutex& safe_timer
   safe_timer_lock.Unlock();
 
   for (int i = 1; i < array_idx; i += 2) {
-    if (array[i] != i) {
+    if (test_array[i] != i) {
       ret = 1;
-      cout << "error: expected array[" << i << "] = " << i
-	   << "; got " << array[i] << " instead." << std::endl;
+      cout << "error: expected test_array[" << i << "] = " << i
+	   << "; got " << test_array[i] << " instead." << std::endl;
     }
   }
 
@@ -255,7 +255,8 @@ int main(int argc, const char **argv)
   argv_to_vec(argc, argv, args);
   env_to_vec(args);
 
-  global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT, CODE_ENVIRONMENT_UTILITY, 0);
+  auto cct = global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT,
+                         CODE_ENVIRONMENT_UTILITY, 0);
   common_init_finish(g_ceph_context);
 
   int ret;

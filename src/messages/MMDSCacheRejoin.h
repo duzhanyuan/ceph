@@ -21,6 +21,7 @@
 
 #include "mds/CInode.h"
 #include "mds/CDir.h"
+#include "mds/mdstypes.h"
 
 // sent from replica to auth
 
@@ -33,22 +34,18 @@ class MMDSCacheRejoin : public Message {
   static const int OP_WEAK    = 1;  // replica -> auth, i exist, + maybe open files.
   static const int OP_STRONG  = 2;  // replica -> auth, i exist, + open files and lock state.
   static const int OP_ACK     = 3;  // auth -> replica, here is your lock state.
-  static const int OP_MISSING = 5;  // auth -> replica, i am missing these items
-  static const int OP_FULL    = 6;  // replica -> auth, here is the full object.
   static const char *get_opname(int op) {
     switch (op) {
     case OP_WEAK: return "weak";
     case OP_STRONG: return "strong";
     case OP_ACK: return "ack";
-    case OP_MISSING: return "missing";
-    case OP_FULL: return "full";
-    default: assert(0); return 0;
+    default: ceph_abort(); return 0;
     }
   }
 
   // -- types --
   struct inode_strong { 
-    int32_t nonce;
+    uint32_t nonce;
     int32_t caps_wanted;
     int32_t filelock, nestlock, dftlock;
     inode_strong() {}
@@ -73,7 +70,7 @@ class MMDSCacheRejoin : public Message {
   WRITE_CLASS_ENCODER(inode_strong)
 
   struct dirfrag_strong {
-    int32_t nonce;
+    uint32_t nonce;
     int8_t  dir_rep;
     dirfrag_strong() {}
     dirfrag_strong(int n, int dr) : nonce(n), dir_rep(dr) {}
@@ -93,7 +90,7 @@ class MMDSCacheRejoin : public Message {
     inodeno_t ino;
     inodeno_t remote_ino;
     unsigned char remote_d_type;
-    int32_t nonce;
+    uint32_t nonce;
     int32_t lock;
     dn_strong() : 
       ino(0), remote_ino(0), remote_d_type(0), nonce(0), lock(0) {}
@@ -167,7 +164,9 @@ class MMDSCacheRejoin : public Message {
   map<vinodeno_t, inode_strong> strong_inodes;
 
   // open
-  map<inodeno_t,map<client_t, ceph_mds_cap_reconnect> > cap_exports;
+  map<inodeno_t,map<client_t, cap_reconnect_t> > cap_exports;
+  map<client_t, entity_inst_t> client_map;
+  bufferlist imported_caps;
 
   // full
   bufferlist inode_base;
@@ -198,17 +197,17 @@ class MMDSCacheRejoin : public Message {
   map<dirfrag_t, map<string_snap_t, slave_reqid> > xlocked_dentries;
   
   MMDSCacheRejoin() :
-    Message(MSG_MDS_CACHEREJOIN, HEAD_VERSION, COMPAT_VERSION)
-  {}
+    Message(MSG_MDS_CACHEREJOIN, HEAD_VERSION, COMPAT_VERSION),
+    op(0) {}
   MMDSCacheRejoin(int o) : 
     Message(MSG_MDS_CACHEREJOIN, HEAD_VERSION, COMPAT_VERSION),
     op(o) {}
 private:
-  ~MMDSCacheRejoin() {}
+  ~MMDSCacheRejoin() override {}
 
 public:
-  const char *get_type_name() const { return "cache_rejoin"; }
-  void print(ostream& out) const {
+  const char *get_type_name() const override { return "cache_rejoin"; }
+  void print(ostream& out) const override {
     out << "cache_rejoin " << get_opname(op);
   }
 
@@ -220,19 +219,17 @@ public:
   void add_strong_inode(vinodeno_t i, int n, int cw, int dl, int nl, int dftl) {
     strong_inodes[i] = inode_strong(n, cw, dl, nl, dftl);
   }
-  void add_inode_locks(CInode *in, __u32 nonce) {
+  void add_inode_locks(CInode *in, __u32 nonce, bufferlist& bl) {
     ::encode(in->inode.ino, inode_locks);
     ::encode(in->last, inode_locks);
     ::encode(nonce, inode_locks);
-    bufferlist bl;
-    in->_encode_locks_state_for_replica(bl);
     ::encode(bl, inode_locks);
   }
-  void add_inode_base(CInode *in) {
+  void add_inode_base(CInode *in, uint64_t features) {
     ::encode(in->inode.ino, inode_base);
     ::encode(in->last, inode_base);
     bufferlist bl;
-    in->_encode_base(bl);
+    in->_encode_base(bl, features);
     ::encode(bl, inode_base);
   }
   void add_inode_authpin(vinodeno_t ino, const metareqid_t& ri, __u32 attempt) {
@@ -288,7 +285,7 @@ public:
   }
 
   // -- encoding --
-  void encode_payload(uint64_t features) {
+  void encode_payload(uint64_t features) override {
     ::encode(op, payload);
     ::encode(strong_inodes, payload);
     ::encode(inode_base, payload);
@@ -299,6 +296,8 @@ public:
     ::encode(xlocked_inodes, payload);
     ::encode(wrlocked_inodes, payload);
     ::encode(cap_exports, payload);
+    ::encode(client_map, payload, features);
+    ::encode(imported_caps, payload);
     ::encode(strong_dirfrags, payload);
     ::encode(dirfrag_bases, payload);
     ::encode(weak, payload);
@@ -308,7 +307,7 @@ public:
     ::encode(authpinned_dentries, payload);
     ::encode(xlocked_dentries, payload);
   }
-  void decode_payload() {
+  void decode_payload() override {
     bufferlist::iterator p = payload.begin();
     ::decode(op, p);
     ::decode(strong_inodes, p);
@@ -320,6 +319,8 @@ public:
     ::decode(xlocked_inodes, p);
     ::decode(wrlocked_inodes, p);
     ::decode(cap_exports, p);
+    ::decode(client_map, p);
+    ::decode(imported_caps, p);
     ::decode(strong_dirfrags, p);
     ::decode(dirfrag_bases, p);
     ::decode(weak, p);

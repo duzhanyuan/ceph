@@ -1,4 +1,5 @@
-
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// vim: ts=8 sw=2 smarttab
 
 #include "rgw_gc.h"
 #include "include/rados/librados.hpp"
@@ -9,6 +10,7 @@
 
 #include <list>
 
+#define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_rgw
 
 using namespace std;
@@ -17,11 +19,13 @@ using namespace librados;
 static string gc_oid_prefix = "gc";
 static string gc_index_lock_name = "gc_process";
 
+
 void RGWGC::initialize(CephContext *_cct, RGWRados *_store) {
   cct = _cct;
   store = _store;
 
-  max_objs = cct->_conf->rgw_gc_max_objs;
+  max_objs = min(static_cast<int>(cct->_conf->rgw_gc_max_objs), rgw_shards_max());
+
   obj_names = new string[max_objs];
 
   for (int i = 0; i < max_objs; i++) {
@@ -39,7 +43,7 @@ void RGWGC::finalize()
 
 int RGWGC::tag_index(const string& tag)
 {
-  return ceph_str_hash_linux(tag.c_str(), tag.size()) % max_objs;
+  return rgw_shards_hash(tag, max_objs);
 }
 
 void RGWGC::add_chain(ObjectWriteOperation& op, cls_rgw_obj_chain& chain, const string& tag)
@@ -84,13 +88,14 @@ int RGWGC::remove(int index, const std::list<string>& tags)
   return store->gc_operate(obj_names[index], &op);
 }
 
-int RGWGC::list(int *index, string& marker, uint32_t max, std::list<cls_rgw_gc_obj_info>& result, bool *truncated)
+int RGWGC::list(int *index, string& marker, uint32_t max, bool expired_only, std::list<cls_rgw_gc_obj_info>& result, bool *truncated)
 {
   result.clear();
+  string next_marker;
 
-  for (; *index < cct->_conf->rgw_gc_max_objs && result.size() < max; (*index)++, marker.clear()) {
+  for (; *index < max_objs && result.size() < max; (*index)++, marker.clear()) {
     std::list<cls_rgw_gc_obj_info> entries;
-    int ret = cls_rgw_gc_list(store->gc_pool_ctx, obj_names[*index], marker, max - result.size(), entries, truncated);
+    int ret = cls_rgw_gc_list(store->gc_pool_ctx, obj_names[*index], marker, max - result.size(), expired_only, entries, truncated, next_marker);
     if (ret == -ENOENT)
       continue;
     if (ret < 0)
@@ -101,7 +106,9 @@ int RGWGC::list(int *index, string& marker, uint32_t max, std::list<cls_rgw_gc_o
       result.push_back(*iter);
     }
 
-    if (*index == cct->_conf->rgw_gc_max_objs - 1) {
+    marker = next_marker;
+
+    if (*index == max_objs - 1) {
       /* we cut short here, truncated will hold the correct value */
       return 0;
     }
@@ -124,7 +131,7 @@ int RGWGC::list(int *index, string& marker, uint32_t max, std::list<cls_rgw_gc_o
 int RGWGC::process(int index, int max_secs)
 {
   rados::cls::lock::Lock l(gc_index_lock_name);
-  utime_t end = ceph_clock_now(g_ceph_context);
+  utime_t end = ceph_clock_now();
   std::list<string> remove_tags;
 
   /* max_secs should be greater than zero. We don't want a zero max_secs
@@ -140,19 +147,20 @@ int RGWGC::process(int index, int max_secs)
 
   int ret = l.lock_exclusive(&store->gc_pool_ctx, obj_names[index]);
   if (ret == -EBUSY) { /* already locked by another gc processor */
-    dout(0) << "RGWGC::process() failed to acquire lock on " << obj_names[index] << dendl;
+    dout(10) << "RGWGC::process() failed to acquire lock on " << obj_names[index] << dendl;
     return 0;
   }
   if (ret < 0)
     return ret;
 
   string marker;
+  string next_marker;
   bool truncated;
-  IoCtx *ctx = NULL;
+  IoCtx *ctx = new IoCtx;
   do {
     int max = 100;
     std::list<cls_rgw_gc_obj_info> entries;
-    ret = cls_rgw_gc_list(store->gc_pool_ctx, obj_names[index], marker, max, entries, &truncated);
+    ret = cls_rgw_gc_list(store->gc_pool_ctx, obj_names[index], marker, max, true, entries, &truncated, next_marker);
     if (ret == -ENOENT) {
       ret = 0;
       goto done;
@@ -161,7 +169,6 @@ int RGWGC::process(int index, int max_secs)
       goto done;
 
     string last_pool;
-    ctx = new IoCtx;
     std::list<cls_rgw_gc_obj_info>::iterator iter;
     for (iter = entries.begin(); iter != entries.end(); ++iter) {
       bool remove_tag;
@@ -169,7 +176,7 @@ int RGWGC::process(int index, int max_secs)
       std::list<cls_rgw_obj>::iterator liter;
       cls_rgw_obj_chain& chain = info.chain;
 
-      utime_t now = ceph_clock_now(g_ceph_context);
+      utime_t now = ceph_clock_now();
       if (now >= end)
         goto done;
 
@@ -180,7 +187,7 @@ int RGWGC::process(int index, int max_secs)
         if (obj.pool != last_pool) {
           delete ctx;
           ctx = new IoCtx;
-	  ret = store->rados->ioctx_create(obj.pool.c_str(), *ctx);
+	  ret = rgw_init_ioctx(store->get_rados_handle(), obj.pool, *ctx);
 	  if (ret < 0) {
 	    dout(0) << "ERROR: failed to create ioctx pool=" << obj.pool << dendl;
 	    continue;
@@ -188,16 +195,19 @@ int RGWGC::process(int index, int max_secs)
           last_pool = obj.pool;
         }
 
-        ctx->locator_set_key(obj.key);
-	dout(0) << "gc::process: removing " << obj.pool << ":" << obj.oid << dendl;
+        ctx->locator_set_key(obj.loc);
+
+        const string& oid = obj.key.name; /* just stored raw oid there */
+
+	dout(5) << "gc::process: removing " << obj.pool << ":" << obj.key.name << dendl;
 	ObjectWriteOperation op;
 	cls_refcount_put(op, info.tag, true);
-        ret = ctx->operate(obj.oid, &op);
+        ret = ctx->operate(oid, &op);
 	if (ret == -ENOENT)
 	  ret = 0;
         if (ret < 0) {
           remove_tag = false;
-          dout(0) << "failed to remove " << obj.pool << ":" << obj.oid << "@" << obj.key << dendl;
+          dout(0) << "failed to remove " << obj.pool << ":" << oid << "@" << obj.loc << dendl;
         }
 
         if (going_down()) // leave early, even if tag isn't removed, it's ok
@@ -207,16 +217,20 @@ int RGWGC::process(int index, int max_secs)
         remove_tags.push_back(info.tag);
 #define MAX_REMOVE_CHUNK 16
         if (remove_tags.size() > MAX_REMOVE_CHUNK) {
-          remove(index, remove_tags);
+          RGWGC::remove(index, remove_tags);
           remove_tags.clear();
         }
       }
+    }
+    if (!remove_tags.empty()) {
+      RGWGC::remove(index, remove_tags);
+      remove_tags.clear();
     }
   } while (truncated);
 
 done:
   if (!remove_tags.empty())
-    remove(index, remove_tags);
+    RGWGC::remove(index, remove_tags);
   l.unlock(&store->gc_pool_ctx, obj_names[index]);
   delete ctx;
   return 0;
@@ -224,7 +238,6 @@ done:
 
 int RGWGC::process()
 {
-  int max_objs = cct->_conf->rgw_gc_max_objs;
   int max_secs = cct->_conf->rgw_gc_processor_max_time;
 
   unsigned start;
@@ -244,18 +257,18 @@ int RGWGC::process()
 
 bool RGWGC::going_down()
 {
-  return (down_flag.read() != 0);
+  return down_flag;
 }
 
 void RGWGC::start_processor()
 {
   worker = new GCWorker(cct, this);
-  worker->create();
+  worker->create("rgw_gc");
 }
 
 void RGWGC::stop_processor()
 {
-  down_flag.set(1);
+  down_flag = true;
   if (worker) {
     worker->stop();
     worker->join();
@@ -266,7 +279,7 @@ void RGWGC::stop_processor()
 
 void *RGWGC::GCWorker::entry() {
   do {
-    utime_t start = ceph_clock_now(cct);
+    utime_t start = ceph_clock_now();
     dout(2) << "garbage collection: start" << dendl;
     int r = gc->process();
     if (r < 0) {
@@ -277,7 +290,7 @@ void *RGWGC::GCWorker::entry() {
     if (gc->going_down())
       break;
 
-    utime_t end = ceph_clock_now(cct);
+    utime_t end = ceph_clock_now();
     end -= start;
     int secs = cct->_conf->rgw_gc_processor_period;
 
@@ -287,7 +300,7 @@ void *RGWGC::GCWorker::entry() {
     secs -= end.sec();
 
     lock.Lock();
-    cond.WaitInterval(cct, lock, utime_t(secs, 0));
+    cond.WaitInterval(lock, utime_t(secs, 0));
     lock.Unlock();
   } while (!gc->going_down());
 

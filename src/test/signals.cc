@@ -1,14 +1,19 @@
 #include "common/config.h"
 #include "common/signal.h"
 #include "global/signal_handler.h"
+#include "common/debug.h"
+#include "include/coredumpctl.h"
 
-#include "test/unit.h"
+#include "gtest/gtest.h"
 
 #include <errno.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <unistd.h>
 
+#include "include/assert.h"
+
+#define dout_context g_ceph_context
 static volatile sig_atomic_t got_sigusr1 = 0;
 
 static void handle_sigusr1(int signo)
@@ -110,6 +115,17 @@ TEST(SignalHandler, Multiple)
   unregister_async_signal_handler(SIGUSR2, testhandler);
   shutdown_async_signal_handler();
 }
+
+TEST(SignalHandler, LogInternal)
+{
+  g_ceph_context->_log->inject_segv();
+  {
+    PrCtl unset_dumpable;
+    ASSERT_DEATH(derr << "foo" << dendl, ".*");
+  }
+  g_ceph_context->_log->reset_segv();
+}
+
 
 /*
 TEST(SignalHandler, MultipleBigFd)

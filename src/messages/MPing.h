@@ -13,23 +13,21 @@
  */
 
 
-
 #ifndef CEPH_MPING_H
 #define CEPH_MPING_H
 
 #include "msg/Message.h"
-#include "include/encoding.h"
 
 class MPing : public Message {
  public:
   MPing() : Message(CEPH_MSG_PING) {}
 private:
-  ~MPing() {}
+  ~MPing() override {}
 
 public:
-  void decode_payload() { }
-  void encode_payload(uint64_t features) { }
-  const char *get_type_name() const { return "ping"; }
+  void decode_payload() override { }
+  void encode_payload(uint64_t features) override { }
+  const char *get_type_name() const override { return "ping"; }
 };
 
 #endif

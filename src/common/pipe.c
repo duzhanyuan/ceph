@@ -11,9 +11,7 @@
  * Foundation.  See file COPYING.
  *
  */
-#include "acconfig.h"
-
-#include "common/pipe.h"
+#include "include/compat.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -52,8 +50,8 @@ int pipe_cloexec(int pipefd[2])
 	return 0;
 
 out:
-	TEMP_FAILURE_RETRY(close(pipefd[0]));
-	TEMP_FAILURE_RETRY(close(pipefd[1]));
+	VOID_TEMP_FAILURE_RETRY(close(pipefd[0]));
+	VOID_TEMP_FAILURE_RETRY(close(pipefd[1]));
 
 	return ret;
 #endif

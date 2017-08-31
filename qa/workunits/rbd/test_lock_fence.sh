@@ -1,14 +1,13 @@
-#!/bin/bash  -x
+#!/usr/bin/env bash
 # can't use -e because of background process
+set -x
 
 IMAGE=rbdrw-image
 LOCKID=rbdrw
-RBDRW=rbdrw.py
-CEPH_REF=${CEPH_REF:-master}
+RELPATH=$(dirname $0)/../../../src/test/librbd
+RBDRW=$RELPATH/rbdrw.py
 
-wget -O $RBDRW "https://ceph.com/git/?p=ceph.git;a=blob_plain;hb=$CEPH_REF;f=src/test/librbd/rbdrw.py"
-
-rbd create $IMAGE --size 10 --image-format 2 || exit 1
+rbd create $IMAGE --size 10 --image-format 2 --image-shared || exit 1
 
 # rbdrw loops doing I/O to $IMAGE after locking with lockid $LOCKID
 python $RBDRW $IMAGE $LOCKID &

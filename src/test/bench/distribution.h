@@ -35,7 +35,7 @@ public:
     Distribution<V> *v,
     Distribution<W> *w)
     : t(t), u(u), v(v), w(w) {}
-  boost::tuple<T, U, V, W> operator()() {
+  boost::tuple<T, U, V, W> operator()() override {
     return boost::make_tuple((*t)(), (*u)(), (*v)(), (*w)());
   }
 };
@@ -45,7 +45,7 @@ class RandomDist : public Distribution<T> {
   rngen_t rng;
   std::map<uint64_t, T> contents;
 public:
-  RandomDist(rngen_t rng, std::set<T> &initial) : rng(rng) {
+  RandomDist(const rngen_t &rng, std::set<T> &initial) : rng(rng) {
     uint64_t count = 0;
     for (typename std::set<T>::iterator i = initial.begin();
 	 i != initial.end();
@@ -53,7 +53,7 @@ public:
       contents.insert(std::make_pair(count, *i));
     }
   }
-  virtual T operator()() {
+  T operator()() override {
     assert(contents.size());
     boost::uniform_int<> value(0, contents.size() - 1);
     return contents.find(value(rng))->second;
@@ -66,7 +66,7 @@ class WeightedDist : public Distribution<T> {
   double total;
   std::map<double, T> contents;
 public:
-  WeightedDist(rngen_t rng, const std::set<std::pair<double, T> > &initial)
+  WeightedDist(const rngen_t &rng, const std::set<std::pair<double, T> > &initial)
     : rng(rng), total(0) {
     for (typename std::set<std::pair<double, T> >::const_iterator i =
 	   initial.begin();
@@ -76,7 +76,7 @@ public:
       contents.insert(std::make_pair(total, i->second));
     }
   }
-  virtual T operator()() {
+  T operator()() override {
     return contents.lower_bound(
       boost::uniform_real<>(0, total)(rng))->second;
   }
@@ -105,9 +105,9 @@ class UniformRandom : public Distribution<uint64_t> {
   uint64_t min;
   uint64_t max;
 public:
-  UniformRandom(rngen_t rng, uint64_t min, uint64_t max) :
+  UniformRandom(const rngen_t &rng, uint64_t min, uint64_t max) :
     rng(rng), min(min), max(max) {}
-  virtual uint64_t operator()() {
+  uint64_t operator()() override {
     return boost::uniform_int<uint64_t>(min, max)(rng);
   }
 };
@@ -118,7 +118,7 @@ class Align : public Distribution<uint64_t> {
 public:
   Align(Distribution<uint64_t> *dist, uint64_t align) :
     dist(dist), align(align) {}
-  virtual uint64_t operator()() {
+  uint64_t operator()() override {
     uint64_t ret = (*dist)();
     return ret - (ret % align);
   }
@@ -127,8 +127,8 @@ public:
 class Uniform : public Distribution<uint64_t> {
   uint64_t val;
 public:
-  Uniform(uint64_t val) : val(val) {}
-  virtual uint64_t operator()() {
+  explicit Uniform(uint64_t val) : val(val) {}
+  uint64_t operator()() override {
     return val;
   }
 };

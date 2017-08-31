@@ -24,19 +24,24 @@ class ESession : public LogEvent {
  protected:
   entity_inst_t client_inst;
   bool open;    // open or close
-  version_t cmapv;  // client map version
+  version_t cmapv{0};  // client map version
 
   interval_set<inodeno_t> inos;
-  version_t inotablev;
+  version_t inotablev{0};
+
+  // Client metadata stored during open
+  std::map<std::string, std::string> client_metadata;
 
  public:
   ESession() : LogEvent(EVENT_SESSION), open(false) { }
-  ESession(const entity_inst_t& inst, bool o, version_t v) :
+  ESession(const entity_inst_t& inst, bool o, version_t v,
+      const std::map<std::string, std::string> &cm) :
     LogEvent(EVENT_SESSION),
     client_inst(inst),
     open(o),
     cmapv(v),
-    inotablev(0) {
+    inotablev(0),
+    client_metadata(cm) {
   }
   ESession(const entity_inst_t& inst, bool o, version_t v,
 	   const interval_set<inodeno_t>& i, version_t iv) :
@@ -46,12 +51,12 @@ class ESession : public LogEvent {
     cmapv(v),
     inos(i), inotablev(iv) { }
 
-  void encode(bufferlist& bl) const;
-  void decode(bufferlist::iterator& bl);
-  void dump(Formatter *f) const;
+  void encode(bufferlist& bl, uint64_t features) const override;
+  void decode(bufferlist::iterator& bl) override;
+  void dump(Formatter *f) const override;
   static void generate_test_instances(list<ESession*>& ls);
 
-  void print(ostream& out) const {
+  void print(ostream& out) const override {
     if (open)
       out << "ESession " << client_inst << " open cmapv " << cmapv;
     else
@@ -60,8 +65,10 @@ class ESession : public LogEvent {
       out << " (" << inos.size() << " inos, v" << inotablev << ")";
   }
   
-  void update_segment();
-  void replay(MDS *mds);  
+  void update_segment() override;
+  void replay(MDSRank *mds) override;
+  entity_inst_t get_client_inst() const {return client_inst;}
 };
+WRITE_CLASS_ENCODER_FEATURES(ESession)
 
 #endif

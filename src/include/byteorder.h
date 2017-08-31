@@ -1,39 +1,45 @@
-/*
- * byteorder.h
- *
- * LGPL 2
- */
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 
-#ifndef CEPH_BYTEORDER_H
-#define CEPH_BYTEORDER_H
+#pragma once
 
-#if defined(__linux__)
-#include <endian.h>
-#elif defined(__FreeBSD__)
-#include <sys/endian.h>
+#include <type_traits>
+#include "acconfig.h"
+#include "int_types.h"
+
+
+#ifdef __GNUC__
+template<typename T>
+inline typename std::enable_if<sizeof(T) == sizeof(uint16_t), T>::type
+swab(T val) {
+  return __builtin_bswap16(val);
+}
+template<typename T>
+inline typename std::enable_if<sizeof(T) == sizeof(uint32_t), T>::type
+swab(T val) {
+  return __builtin_bswap32(val);
+}
+template<typename T>
+inline typename std::enable_if<sizeof(T) == sizeof(uint64_t), T>::type
+swab(T val) {
+  return __builtin_bswap64(val);
+}
 #else
-#error "Your platform is not yet supported."
-#endif
-
-#if defined(__FreeBSD__)
-#define	__BYTE_ORDER _BYTE_ORDER
-#define	__BIG_ENDIAN _BIG_ENDIAN
-#define	__LITTLE_ENDIAN _LITTLE_ENDIAN
-#endif
-
-static __inline__ __u16 swab16(__u16 val) 
-{
+template<typename T>
+inline typename std::enable_if<sizeof(T) == sizeof(uint16_t), T>::type
+swab(T val) {
   return (val >> 8) | (val << 8);
 }
-static __inline__ __u32 swab32(__u32 val) 
-{
+template<typename T>
+inline typename std::enable_if<sizeof(T) == sizeof(uint32_t), T>::type
+swab(T val) {
   return (( val >> 24) |
 	  ((val >> 8)  & 0xff00) |
 	  ((val << 8)  & 0xff0000) | 
 	  ((val << 24)));
 }
-static __inline__ uint64_t swab64(uint64_t val) 
-{
+template<typename T>
+inline typename std::enable_if<sizeof(T) == sizeof(uint64_t), T>::type
+swab(T val) {
   return (( val >> 56) |
 	  ((val >> 40) & 0xff00ull) |
 	  ((val >> 24) & 0xff0000ull) |
@@ -43,47 +49,49 @@ static __inline__ uint64_t swab64(uint64_t val)
 	  ((val << 40) & 0xff000000000000ull) |
 	  ((val << 56)));
 }
-
-#if !defined(__BYTE_ORDER) || !defined(__BIG_ENDIAN) || !defined(__LITTLE_ENDIAN)
-#error "Endianess is unknown!"
 #endif
 
 // mswab == maybe swab (if not LE)
-#if __BYTE_ORDER == __BIG_ENDIAN
-# define mswab64(a) swab64(a)
-# define mswab32(a) swab32(a)
-# define mswab16(a) swab16(a)
+#ifdef CEPH_BIG_ENDIAN
+template<typename T>
+inline T mswab(T val) {
+  return swab(val);
+}
 #else
-# if __BYTE_ORDER != __LITTLE_ENDIAN
-#  warning __BYTE_ORDER is not defined, assuming little endian
-# endif
-# define mswab64(a) (a)
-# define mswab32(a) (a)
-# define mswab16(a) (a)
+template<typename T>
+inline T mswab(T val) {
+  return val;
+}
 #endif
 
-
-#define MAKE_LE_CLASS(bits)						\
-  struct ceph_le##bits {							\
-    __u##bits v;							\
-    ceph_le##bits &operator=(__u##bits nv) {				\
-      v = mswab##bits(nv);						\
-      return *this;							\
-    }									\
-    operator __u##bits() const { return mswab##bits(v); }		\
-  } __attribute__ ((packed));						\
-  static inline bool operator==(ceph_le##bits a, ceph_le##bits b) {		\
-    return a.v == b.v;							\
+template<typename T>
+struct ceph_le {
+  T v;
+  ceph_le<T>& operator=(T nv) {
+    v = mswab(nv);
+    return *this;
   }
-  
-MAKE_LE_CLASS(64)
-MAKE_LE_CLASS(32)
-MAKE_LE_CLASS(16)
-#undef MAKE_LE_CLASS
+  operator T() const { return mswab(v); }
+} __attribute__ ((packed));
 
-#define init_le64(x) { (__u64)mswab64(x) }
-#define init_le32(x) { (__u32)mswab32(x) }
-#define init_le16(x) { (__u16)mswab16(x) }
+template<typename T>
+inline bool operator==(ceph_le<T> a, ceph_le<T> b) {
+  return a.v == b.v;
+}
+
+using ceph_le64 = ceph_le<__u64>;
+using ceph_le32 = ceph_le<__u32>;
+using ceph_le16 = ceph_le<__u16>;
+
+inline __u64 init_le64(__u64 x) {
+  return mswab<__u64>(x);
+}
+inline __u32 init_le32(__u32 x) {
+  return mswab<__u32>(x);
+}
+inline __u16 init_le16(__u16 x) {
+  return mswab<__u16>(x);
+}
 
   /*
 #define cpu_to_le64(x) (x)
@@ -93,5 +101,3 @@ MAKE_LE_CLASS(16)
 #define le64_to_cpu(x) ((uint64_t)x)
 #define le32_to_cpu(x) ((__u32)x)
 #define le16_to_cpu(x) ((__u16)x)
-
-#endif

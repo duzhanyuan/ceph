@@ -45,12 +45,11 @@ is the primary and the rest are replicas.
 Many PGs can map to one OSD.
 
 A PG represents nothing but a grouping of objects; you configure the
-number of PGs you want (see
-http://ceph.com/wiki/Changing_the_number_of_PGs ), number of
-OSDs * 100 is a good starting point, and all of your stored objects
-are pseudo-randomly evenly distributed to the PGs. So a PG explicitly
-does NOT represent a fixed amount of storage; it represents 1/pg_num
-'th of the storage you happen to have on your OSDs.
+number of PGs you want, number of OSDs * 100 is a good starting point
+, and all of your stored objects are pseudo-randomly evenly distributed
+to the PGs. So a PG explicitly does NOT represent a fixed amount of
+storage; it represents 1/pg_num'th of the storage you happen to have
+on your OSDs.
 
 Ignoring the finer points of CRUSH and custom placement, it goes
 something like this in pseudocode::
@@ -58,12 +57,12 @@ something like this in pseudocode::
 	locator = object_name
 	obj_hash = hash(locator)
 	pg = obj_hash % num_pg
-	osds_for_pg = crush(pg)  # returns a list of osds
+	OSDs_for_pg = crush(pg)  # returns a list of OSDs
 	primary = osds_for_pg[0]
 	replicas = osds_for_pg[1:]
 
 If you want to understand the crush() part in the above, imagine a
-perfectly spherical datacenter in a vacuum ;) that is, if all osds
+perfectly spherical datacenter in a vacuum ;) that is, if all OSDs
 have weight 1.0, and there is no topology to the data center (all OSDs
 are on the top level), and you use defaults, etc, it simplifies to
 consistent hashing; you can think of it as::
@@ -76,7 +75,7 @@ consistent hashing; you can think of it as::
 	       r = hash(pg)
 	       chosen = all_osds[ r % len(all_osds) ]
 	       if chosen in result:
-	           # osd can be picked only once
+	           # OSD can be picked only once
 	           continue
 	       result.append(chosen)
 	   return result
@@ -127,12 +126,12 @@ User-visible PG States
 *recovery_wait*
   the PG is waiting for the local/remote recovery reservations
 
-*backfill*
+*backfilling*
   a special case of recovery, in which the entire contents of
   the PG are scanned and synchronized, instead of inferring what
   needs to be transferred from the PG logs of recent operations
 
-*backfill-wait*
+*backfill_wait*
   the PG is waiting in line to start backfill
 
 *backfill_toofull*

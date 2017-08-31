@@ -23,6 +23,10 @@ using namespace librados;
 #include <stdlib.h>
 #include <time.h>
 
+#pragma GCC diagnostic ignored "-Wpragmas"
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+
 void buf_to_hex(const unsigned char *buf, int len, char *str)
 {
   str[0] = '\0';
@@ -34,15 +38,19 @@ void buf_to_hex(const unsigned char *buf, int len, char *str)
 class C_Watch : public WatchCtx {
 public:
   C_Watch() {}
-  void notify(uint8_t opcode, uint64_t ver, bufferlist& bl) {
+  void notify(uint8_t opcode, uint64_t ver, bufferlist& bl) override {
     cout << "C_Watch::notify() opcode=" << (int)opcode << " ver=" << ver << std::endl;
   }
 };
 
 void testradospp_milestone(void)
 {
+  int c;
   cout << "*** press enter to continue ***" << std::endl;
-  getchar();
+  while ((c = getchar()) != EOF) {
+    if (c == '\n')
+      break;
+  }
 }
 
 int main(int argc, const char **argv) 
@@ -97,8 +105,11 @@ int main(int argc, const char **argv)
 
   const char *oid = "bar";
 
+  int r = rados.pool_create("foo");
+  cout << "pool_create result = " << r << std::endl;
+
   IoCtx io_ctx;
-  int r = rados.ioctx_create("data", io_ctx);
+  r = rados.ioctx_create("foo", io_ctx);
   cout << "ioctx_create result = " << r << std::endl;
 
   r = io_ctx.write(oid, bl, bl.length(), 0);
@@ -112,7 +123,7 @@ int main(int argc, const char **argv)
   cout << "io_ctx.stat returned " << r << " size = " << stat_size << " mtime = " << stat_mtime << std::endl;
 
   r = io_ctx.stat(oid, NULL, NULL);
-  cout << "io_ctx.stat(does_not_exist) = " << r;
+  cout << "io_ctx.stat(does_not_exist) = " << r << std::endl;
 
   uint64_t handle;
   C_Watch wc;
@@ -132,12 +143,10 @@ int main(int argc, const char **argv)
 
   r = io_ctx.unwatch(oid, handle);
   cout << "io_ctx.unwatch returned " << r << std::endl;
-  cout << "*** press enter to continue ***" << std::endl;
   testradospp_milestone();
 
   r = io_ctx.notify(oid, objver, notify_bl);
   cout << "io_ctx.notify returned " << r << std::endl;
-  cout << "*** press enter to continue ***" << std::endl;
   testradospp_milestone();
   io_ctx.set_assert_version(objver);
 
@@ -181,22 +190,6 @@ int main(int argc, const char **argv)
   r = io_ctx.read(oid, bl, 0, 1);
   assert(r == -EOVERFLOW);
 
-  // test assert_src_version
-  const char *dest = "baz";
-  r = io_ctx.read(oid, bl, 0, 1);
-  assert(r >= 0);
-  v = io_ctx.get_last_version();
-  cout << oid << " version is " << v << std::endl;
-  io_ctx.set_assert_src_version(oid, v);
-  r = io_ctx.clone_range(dest, 0, oid, 0, 1);
-  assert(r >= 0);
-  io_ctx.set_assert_src_version(oid, v-1);
-  r = io_ctx.clone_range(dest, 0, oid, 0, 1);
-  assert(r == -ERANGE);
-  io_ctx.set_assert_src_version(oid, v+1);
-  r = io_ctx.clone_range(dest, 0, oid, 0, 1);
-  assert(r == -EOVERFLOW);
-  
   r = io_ctx.exec(oid, "crypto", "sha1", bl, bl2);
   cout << "exec returned " << r << std::endl;
   const unsigned char *sha1 = (const unsigned char *)bl2.c_str();
@@ -263,37 +256,16 @@ int main(int argc, const char **argv)
     ObjectReadOperation o;
     o.cmpxattr("foo", CEPH_OSD_CMPXATTR_OP_EQ, val);
     r = io_ctx.operate(oid, &o, &bl2);
-    cout << " got " << r << " wanted ECANCELED" << std::endl;
+    cout << " got " << r << " wanted " << -ECANCELED << " (-ECANCELED)" << std::endl;
     assert(r == -ECANCELED);
   }
 
-  cout << "src_cmpxattr" << std::endl;
-  const char *oidb = "bar-clone";
-  {
-    ObjectWriteOperation o;
-    o.src_cmpxattr(oid, "foo", CEPH_OSD_CMPXATTR_OP_EQ, val);
-    io_ctx.locator_set_key(oid);
-    o.write_full(val);
-    r = io_ctx.operate(oidb, &o);
-    cout << " got " << r << " wanted ECANCELED" << std::endl;
-    assert(r == -ECANCELED);
-  }
-  {
-    ObjectWriteOperation o;
-    o.src_cmpxattr(oid, "foo", CEPH_OSD_CMPXATTR_OP_NE, val);
-    io_ctx.locator_set_key(oid);
-    o.write_full(val);
-    r = io_ctx.operate(oidb, &o);
-    cout << " got " << r << " wanted >= 0" << std::endl;
-    assert(r >= 0);
-  }
   io_ctx.locator_set_key(string());
-
 
   cout << "iterating over objects..." << std::endl;
   int num_objs = 0;
-  for (ObjectIterator iter = io_ctx.objects_begin();
-       iter != io_ctx.objects_end(); ++iter) {
+  for (NObjectIterator iter = io_ctx.nobjects_begin();
+       iter != io_ctx.nobjects_end(); ++iter) {
     num_objs++;
     cout << "'" << *iter << "'" << std::endl;
   }
@@ -308,8 +280,14 @@ int main(int argc, const char **argv)
 
   r = io_ctx.remove(oid);
   cout << "remove result=" << r << std::endl;
+
+  r = rados.pool_delete("foo");
+  cout << "pool_delete result=" << r << std::endl;
+
   rados.shutdown();
 
   return 0;
 }
 
+#pragma GCC diagnostic pop
+#pragma GCC diagnostic warning "-Wpragmas"

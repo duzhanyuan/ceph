@@ -19,12 +19,12 @@
 #include "include/types.h"
 
 class MExportDirDiscover : public Message {
-  int32_t from;
+  mds_rank_t from = -1;
   dirfrag_t dirfrag;
   filepath path;
 
  public:
-  int get_source_mds() { return from; }
+  mds_rank_t get_source_mds() { return from; }
   inodeno_t get_ino() { return dirfrag.ino; }
   dirfrag_t get_dirfrag() { return dirfrag; }
   filepath& get_path() { return path; }
@@ -34,30 +34,28 @@ class MExportDirDiscover : public Message {
   MExportDirDiscover() :     
     Message(MSG_MDS_EXPORTDIRDISCOVER),
     started(false) { }
-  MExportDirDiscover(int f, filepath& p, dirfrag_t df) : 
+  MExportDirDiscover(dirfrag_t df, filepath& p, mds_rank_t f, uint64_t tid) :
     Message(MSG_MDS_EXPORTDIRDISCOVER),
-    from(f), 
-    dirfrag(df),
-    path(p),
-    started(false)
-  { }
+    from(f), dirfrag(df), path(p), started(false) {
+    set_tid(tid);
+  }
 private:
-  ~MExportDirDiscover() {}
+  ~MExportDirDiscover() override {}
 
 public:
-  const char *get_type_name() const { return "ExDis"; }
-  void print(ostream& o) const {
+  const char *get_type_name() const override { return "ExDis"; }
+  void print(ostream& o) const override {
     o << "export_discover(" << dirfrag << " " << path << ")";
   }
 
-  virtual void decode_payload() {
+  void decode_payload() override {
     bufferlist::iterator p = payload.begin();
     ::decode(from, p);
     ::decode(dirfrag, p);
     ::decode(path, p);
   }
 
-  virtual void encode_payload(uint64_t features) {
+  void encode_payload(uint64_t features) override {
     ::encode(from, payload);
     ::encode(dirfrag, payload);
     ::encode(path, payload);

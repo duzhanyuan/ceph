@@ -21,77 +21,81 @@
 
 #include <stdio.h>
 #include <signal.h>
-#include "os/LFNIndex.h"
-#include "os/chain_xattr.h"
+#include "os/filestore/LFNIndex.h"
+#include "os/filestore/chain_xattr.h"
 #include "common/ceph_argparse.h"
 #include "global/global_init.h"
 #include <gtest/gtest.h>
 
 class TestWrapLFNIndex : public LFNIndex {
 public:
-  TestWrapLFNIndex(coll_t collection,
+  TestWrapLFNIndex(CephContext* cct,
+		   coll_t collection,
 		   const char *base_path,
-		   uint32_t index_version) : LFNIndex(collection, base_path, index_version) {}
+		   uint32_t index_version)
+    : LFNIndex(cct, collection, base_path, index_version) {}
 
-  virtual uint32_t collection_version() {
+  uint32_t collection_version() override {
     return index_version;
   }
 
-  int cleanup() { return 0; }
+  int cleanup() override { return 0; }
 
-  virtual int _split(
+  int _split(
 		     uint32_t match,                           
 		     uint32_t bits,                            
-		     std::tr1::shared_ptr<CollectionIndex> dest
-		     ) { return 0; }
+		     CollectionIndex* dest
+		     ) override { return 0; }
 
   void test_generate_and_parse(const ghobject_t &hoid, const std::string &mangled_expected) {
     const std::string mangled_name = lfn_generate_object_name(hoid);
     EXPECT_EQ(mangled_expected, mangled_name);
     ghobject_t hoid_parsed;
-    EXPECT_TRUE(lfn_parse_object_name(mangled_name, &hoid_parsed));
+    EXPECT_EQ(0, lfn_parse_object_name(mangled_name, &hoid_parsed));
     EXPECT_EQ(hoid, hoid_parsed);
   }
 
 protected:
-  virtual int _init() { return 0; }
+  int _init() override { return 0; }
 
-  virtual int _created(
+  int _created(
 		       const vector<string> &path,
 		       const ghobject_t &hoid,
 		       const string &mangled_name 
-		       ) { return 0; }
+		       ) override { return 0; }
 
-  virtual int _remove(
+  int _remove(
 		      const vector<string> &path,
 		      const ghobject_t &hoid,
 		      const string &mangled_name
-		      ) { return 0; }
+		      ) override { return 0; }
 
-  virtual int _lookup(
+  int _lookup(
 		      const ghobject_t &hoid,
 		      vector<string> *path,
 		      string *mangled_name,
 		      int *exists		 
-		      ) { return 0; }
+		      ) override { return 0; }
 
-  virtual int _collection_list(
-			       vector<ghobject_t> *ls
-			       ) { return 0; }
-
-  virtual int _collection_list_partial(
+  int _collection_list_partial(
 				       const ghobject_t &start,
-				       int min_count,
+				       const ghobject_t &end,
 				       int max_count,
-				       snapid_t seq,
 				       vector<ghobject_t> *ls,
 				       ghobject_t *next
-				       ) { return 0; }
+				       ) override { return 0; }
+  int _pre_hash_collection(
+                                   uint32_t pg_num,
+                                   uint64_t expected_num_objs
+                                  ) override { return 0; }
+
 };
 
 class TestHASH_INDEX_TAG : public TestWrapLFNIndex, public ::testing::Test {
 public:
-  TestHASH_INDEX_TAG() : TestWrapLFNIndex(coll_t("ABC"), "PATH", CollectionIndex::HASH_INDEX_TAG) {
+  TestHASH_INDEX_TAG()
+    : TestWrapLFNIndex(g_ceph_context, coll_t(), "PATH_1",
+		       CollectionIndex::HASH_INDEX_TAG) {
   }
 };
 
@@ -109,13 +113,14 @@ TEST_F(TestHASH_INDEX_TAG, generate_and_parse_name) {
 
 class TestHASH_INDEX_TAG_2 : public TestWrapLFNIndex, public ::testing::Test {
 public:
-  TestHASH_INDEX_TAG_2() : TestWrapLFNIndex(coll_t("ABC"), "PATH", CollectionIndex::HASH_INDEX_TAG_2) {
+  TestHASH_INDEX_TAG_2()
+    : TestWrapLFNIndex(g_ceph_context,
+		       coll_t(), "PATH_1", CollectionIndex::HASH_INDEX_TAG_2) {
   }
 };
 
 TEST_F(TestHASH_INDEX_TAG_2, generate_and_parse_name) {
   const vector<string> path;
-  std::string mangled_name;
   const std::string key("KEY");
   uint64_t hash = 0xABABABAB;
   uint64_t pool = -1;
@@ -133,18 +138,19 @@ TEST_F(TestHASH_INDEX_TAG_2, generate_and_parse_name) {
 
 class TestHOBJECT_WITH_POOL : public TestWrapLFNIndex, public ::testing::Test {
 public:
-  TestHOBJECT_WITH_POOL() : TestWrapLFNIndex(coll_t("ABC"), "PATH", CollectionIndex::HOBJECT_WITH_POOL) {
+  TestHOBJECT_WITH_POOL()
+    : TestWrapLFNIndex(g_ceph_context, coll_t(),
+		       "PATH_1", CollectionIndex::HOBJECT_WITH_POOL) {
   }
 };
 
 TEST_F(TestHOBJECT_WITH_POOL, generate_and_parse_name) {
   const vector<string> path;
-  std::string mangled_name;
   const std::string key("KEY");
   uint64_t hash = 0xABABABAB;
   uint64_t pool = 0xCDCDCDCD;
   int64_t gen = 0xefefefefef;
-  int8_t shard_id = 0xb;
+  shard_id_t shard_id(0xb);
 
   {
     std::string name(".XA/B_\\C.D");
@@ -178,17 +184,19 @@ TEST_F(TestHOBJECT_WITH_POOL, generate_and_parse_name) {
 
 class TestLFNIndex : public TestWrapLFNIndex, public ::testing::Test {
 public:
-  TestLFNIndex() : TestWrapLFNIndex(coll_t("ABC"), "PATH", CollectionIndex::HOBJECT_WITH_POOL) {
+  TestLFNIndex()
+    : TestWrapLFNIndex(g_ceph_context, coll_t(), "PATH_1",
+		       CollectionIndex::HOBJECT_WITH_POOL) {
   }
 
-  virtual void SetUp() {
-    ::chmod("PATH", 0700);
-    ASSERT_EQ(0, ::system("rm -fr PATH"));
-    ASSERT_EQ(0, ::mkdir("PATH", 0700));
+  void SetUp() override {
+    ::chmod("PATH_1", 0700);
+    ASSERT_EQ(0, ::system("rm -fr PATH_1"));
+    ASSERT_EQ(0, ::mkdir("PATH_1", 0700));
   }
 
-  virtual void TearDown() {
-    ASSERT_EQ(0, ::system("rm -fr PATH"));
+  void TearDown() override {
+    ASSERT_EQ(0, ::system("rm -fr PATH_1"));
   }
 };
 
@@ -203,12 +211,14 @@ TEST_F(TestLFNIndex, remove_object) {
     int exists = 666;
     ghobject_t hoid(hobject_t(sobject_t("ABC", CEPH_NOSNAP)));
 
-    EXPECT_EQ(0, ::chmod("PATH", 0000));
-    EXPECT_EQ(-EACCES, remove_object(path, hoid));
-    EXPECT_EQ(0, ::chmod("PATH", 0700));
+    EXPECT_EQ(0, ::chmod("PATH_1", 0000));
+    if (getuid() != 0) {
+      EXPECT_EQ(-EACCES, remove_object(path, hoid));
+    }
+    EXPECT_EQ(0, ::chmod("PATH_1", 0700));
     EXPECT_EQ(-ENOENT, remove_object(path, hoid));
     EXPECT_EQ(0, get_mangled_name(path, hoid, &mangled_name, &exists));
-    const std::string pathname("PATH/" + mangled_name);
+    const std::string pathname("PATH_1/" + mangled_name);
     EXPECT_EQ(0, ::close(::creat(pathname.c_str(), 0600)));
     EXPECT_EQ(0, remove_object(path, hoid));
     EXPECT_EQ(-1, ::access(pathname.c_str(), 0));
@@ -226,7 +236,7 @@ TEST_F(TestLFNIndex, remove_object) {
     EXPECT_EQ(0, get_mangled_name(path, hoid, &mangled_name, &exists));
     EXPECT_EQ(0, exists);
     EXPECT_NE(std::string::npos, mangled_name.find("0_long"));
-    std::string pathname("PATH/" + mangled_name);
+    std::string pathname("PATH_1/" + mangled_name);
     EXPECT_EQ(0, ::close(::creat(pathname.c_str(), 0600)));
     EXPECT_EQ(0, created(hoid, pathname.c_str()));
 
@@ -245,12 +255,12 @@ TEST_F(TestLFNIndex, remove_object) {
     ghobject_t hoid(hobject_t(sobject_t(object_name, CEPH_NOSNAP)));
 
     //
-    //   PATH/AAA..._0_long => does not match long object name
+    //   PATH_1/AAA..._0_long => does not match long object name
     //
     EXPECT_EQ(0, get_mangled_name(path, hoid, &mangled_name, &exists));
     EXPECT_EQ(0, exists);
     EXPECT_NE(std::string::npos, mangled_name.find("0_long"));
-    std::string pathname("PATH/" + mangled_name);
+    std::string pathname("PATH_1/" + mangled_name);
     EXPECT_EQ(0, ::close(::creat(pathname.c_str(), 0600)));
     EXPECT_EQ(0, created(hoid, pathname.c_str()));
     string LFN_ATTR = "user.cephos.lfn";
@@ -263,19 +273,19 @@ TEST_F(TestLFNIndex, remove_object) {
     EXPECT_EQ(object_name_1.size(), (unsigned)chain_setxattr(pathname.c_str(), LFN_ATTR.c_str(), object_name_1.c_str(), object_name_1.size()));
 
     //
-    //   PATH/AAA..._1_long => matches long object name
+    //   PATH_1/AAA..._1_long => matches long object name
     //
     std::string mangled_name_1;
     exists = 666;
     EXPECT_EQ(0, get_mangled_name(path, hoid, &mangled_name_1, &exists));
     EXPECT_NE(std::string::npos, mangled_name_1.find("1_long"));
     EXPECT_EQ(0, exists);
-    std::string pathname_1("PATH/" + mangled_name_1);
+    std::string pathname_1("PATH_1/" + mangled_name_1);
     EXPECT_EQ(0, ::close(::creat(pathname_1.c_str(), 0600)));
     EXPECT_EQ(0, created(hoid, pathname_1.c_str()));
 
     //
-    // remove_object skips PATH/AAA..._0_long and removes PATH/AAA..._1_long
+    // remove_object skips PATH_1/AAA..._0_long and removes PATH_1/AAA..._1_long
     //
     EXPECT_EQ(0, remove_object(path, hoid));
     EXPECT_EQ(0, ::access(pathname.c_str(), 0));
@@ -294,21 +304,21 @@ TEST_F(TestLFNIndex, remove_object) {
     ghobject_t hoid(hobject_t(sobject_t(object_name, CEPH_NOSNAP)));
 
     //
-    //   PATH/AAA..._0_long => matches long object name
+    //   PATH_1/AAA..._0_long => matches long object name
     //
     EXPECT_EQ(0, get_mangled_name(path, hoid, &mangled_name, &exists));
     EXPECT_EQ(0, exists);
     EXPECT_NE(std::string::npos, mangled_name.find("0_long"));
-    std::string pathname("PATH/" + mangled_name);
+    std::string pathname("PATH_1/" + mangled_name);
     EXPECT_EQ(0, ::close(::creat(pathname.c_str(), 0600)));
     EXPECT_EQ(0, created(hoid, pathname.c_str()));
     //
-    //   PATH/AAA..._1_long => matches long object name
+    //   PATH_1/AAA..._1_long => matches long object name
     //
     std::string mangled_name_1 = mangled_name;
     mangled_name_1.replace(mangled_name_1.find("0_long"), 6, "1_long");
-    const std::string pathname_1("PATH/" + mangled_name_1);
-    const std::string cmd("cp --preserve=xattr " + pathname + " " + pathname_1);
+    const std::string pathname_1("PATH_1/" + mangled_name_1);
+    const std::string cmd("cp -a " + pathname + " " + pathname_1);
     EXPECT_EQ(0, ::system(cmd.c_str()));
     const string ATTR = "user.MARK";
     EXPECT_EQ((unsigned)1, (unsigned)chain_setxattr(pathname_1.c_str(), ATTR.c_str(), "Y", 1));
@@ -316,9 +326,9 @@ TEST_F(TestLFNIndex, remove_object) {
     //
     // remove_object replaces the file to be removed with the last from the
     // collision list. In this case it replaces
-    //    PATH/AAA..._0_long 
+    //    PATH_1/AAA..._0_long
     // with
-    //    PATH/AAA..._1_long 
+    //    PATH_1/AAA..._1_long
     //
     EXPECT_EQ(0, remove_object(path, hoid));
     EXPECT_EQ(0, ::access(pathname.c_str(), 0));
@@ -345,7 +355,7 @@ TEST_F(TestLFNIndex, get_mangled_name) {
     EXPECT_NE(std::string::npos, mangled_name.find("ABC__head"));
     EXPECT_EQ(std::string::npos, mangled_name.find("0_long"));
     EXPECT_EQ(0, exists);
-    const std::string pathname("PATH/" + mangled_name);
+    const std::string pathname("PATH_1/" + mangled_name);
     EXPECT_EQ(0, ::close(::creat(pathname.c_str(), 0600)));
     EXPECT_EQ(0, get_mangled_name(path, hoid, &mangled_name, &exists));
     EXPECT_NE(std::string::npos, mangled_name.find("ABC__head"));
@@ -371,7 +381,7 @@ TEST_F(TestLFNIndex, get_mangled_name) {
     EXPECT_NE(std::string::npos, mangled_name.find("0_long"));
     EXPECT_EQ(0, exists);
 
-    const std::string pathname("PATH/" + mangled_name);
+    const std::string pathname("PATH_1/" + mangled_name);
 
     //
     // if a file by the same name exists but does not have the
@@ -394,11 +404,13 @@ TEST_F(TestLFNIndex, get_mangled_name) {
     mangled_name.clear();
     exists = 666;
     EXPECT_EQ(0, ::close(::creat(pathname.c_str(), 0600)));
-    EXPECT_EQ(0, ::chmod("PATH", 0500));
-    EXPECT_EQ(-EACCES, get_mangled_name(path, hoid, &mangled_name, &exists));
+    EXPECT_EQ(0, ::chmod("PATH_1", 0500));
+    if (getuid() != 0) {
+      EXPECT_EQ(-EACCES, get_mangled_name(path, hoid, &mangled_name, &exists));
+    }
     EXPECT_EQ("", mangled_name);
     EXPECT_EQ(666, exists);
-    EXPECT_EQ(0, ::chmod("PATH", 0700));
+    EXPECT_EQ(0, ::chmod("PATH_1", 0700));
     EXPECT_EQ(0, ::unlink(pathname.c_str()));
 
     //
@@ -440,6 +452,10 @@ TEST_F(TestLFNIndex, get_mangled_name) {
 
 int main(int argc, char **argv) {
   int fd = ::creat("detect", 0600);
+  if (fd < 0){
+    cerr << "failed to create file detect" << std::endl;
+    return EXIT_FAILURE;
+  }
   int ret = chain_fsetxattr(fd, "user.test", "A", 1);
   ::close(fd);
   ::unlink("detect");
@@ -449,7 +465,8 @@ int main(int argc, char **argv) {
     vector<const char*> args;
     argv_to_vec(argc, (const char **)argv, args);
 
-    global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT, CODE_ENVIRONMENT_UTILITY, 0);
+    auto cct = global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT,
+			   CODE_ENVIRONMENT_UTILITY, 0);
     common_init_finish(g_ceph_context);
 
     ::testing::InitGoogleTest(&argc, argv);

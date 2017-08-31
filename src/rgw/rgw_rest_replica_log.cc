@@ -22,7 +22,9 @@
 #include "rgw_rest_replica_log.h"
 #include "rgw_client_io.h"
 #include "common/errno.h"
+#include "include/assert.h"
 
+#define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_rgw
 #define REPLICA_INPUT_MAX_LEN (512*1024)
 
@@ -34,30 +36,6 @@ static int parse_to_utime(string& in, utime_t& out) {
     return ret;
 
   out = utime_t(sec, nsec);
-  return 0;
-}
-
-
-template <class T>
-static int get_input(req_state *s, T& out) {
-  int rv, data_len;
-  char *data;
-
-  if ((rv = rgw_rest_read_all_input(s, &data, &data_len, REPLICA_INPUT_MAX_LEN)) < 0) {
-    dout(5) << "Error - reading input data - " << rv << dendl;
-    return rv;
-  }
-
-  JSONParser parser;
-
-  if (!parser.parse(data, data_len)) {
-    free(data);
-    return -EINVAL;
-  }
-
-  decode_json_obj(out, &parser);
-  
-  free(data);
   return 0;
 }
 
@@ -97,7 +75,8 @@ void RGWOp_OBJLog_SetBounds::execute() {
   bufferlist bl;
   list<RGWReplicaItemMarker> markers;
 
-  if ((http_ret = get_input(s, markers)) < 0) {
+  if ((http_ret = rgw_rest_get_json_input(store->ctx(), s, markers, REPLICA_INPUT_MAX_LEN, NULL)) < 0) {
+    dout(5) << "Error - retrieving input data - " << http_ret << dendl;
     return;
   }
 
@@ -143,9 +122,12 @@ void RGWOp_OBJLog_GetBounds::send_response() {
 void RGWOp_OBJLog_DeleteBounds::execute() {
   string id = s->info.args.get("id"),
          daemon_id = s->info.args.get("daemon_id");
+  bool purge_all;
+
+  s->info.args.get_bool("purge-all", &purge_all, false);
 
   if (id.empty() ||
-      daemon_id.empty()) {
+      (!purge_all && daemon_id.empty())) {
     dout(5) << "Error - invalid parameter list" << dendl;
     http_ret = -EINVAL;
     return;
@@ -159,17 +141,18 @@ void RGWOp_OBJLog_DeleteBounds::execute() {
     dout(5) << "Error parsing id parameter - " << id << ", err " << err << dendl;
     http_ret = -EINVAL;
   }
-  
+
   string pool;
   RGWReplicaObjectLogger rl(store, pool, prefix);
-  http_ret = rl.delete_bound(shard, daemon_id);
+  http_ret = rl.delete_bound(shard, daemon_id, purge_all);
 }
 
-static int bucket_instance_to_bucket(RGWRados *store, string& bucket_instance, rgw_bucket& bucket) {
+static int bucket_instance_to_bucket(RGWRados *store, const string& bucket_instance, rgw_bucket& bucket) {
   RGWBucketInfo bucket_info;
-  time_t mtime;
+  real_time mtime;
   
-  int r = store->get_bucket_instance_info(NULL, bucket_instance, bucket_info, &mtime, NULL);
+  RGWObjectCtx obj_ctx(store);
+  int r = store->get_bucket_instance_info(obj_ctx, bucket_instance, bucket_info, &mtime, NULL);
   if (r < 0) {
     dout(5) << "could not get bucket instance info for bucket=" << bucket_instance << ": " << cpp_strerror(r) << dendl;
     if (r == -ENOENT)
@@ -187,15 +170,14 @@ void RGWOp_BILog_SetBounds::execute() {
          time = s->info.args.get("time"),
          daemon_id = s->info.args.get("daemon_id");
 
-  if (bucket_instance.empty() ||
-      marker.empty() ||
+  if (marker.empty() ||
       time.empty() ||
       daemon_id.empty()) {
     dout(5) << "Error - invalid parameter list" << dendl;
     http_ret = -EINVAL;
     return;
   }
-  
+
   utime_t ut;
   
   if (parse_to_utime(time, ut) < 0) {
@@ -203,36 +185,48 @@ void RGWOp_BILog_SetBounds::execute() {
     return;
   }
 
-  rgw_bucket bucket;
-  if ((http_ret = bucket_instance_to_bucket(store, bucket_instance, bucket)) < 0) 
+  int shard_id;
+  http_ret = rgw_bucket_parse_bucket_instance(bucket_instance, &bucket_instance, &shard_id);
+  if (http_ret < 0) {
+    dout(5) << "failed to parse bucket instance" << dendl;
     return;
+  }
 
+  rgw_bucket bucket;
+
+  if ((http_ret = bucket_instance_to_bucket(store, bucket_instance, bucket)) < 0) {
+    return;
+  }
+  
   RGWReplicaBucketLogger rl(store);
   bufferlist bl;
   list<RGWReplicaItemMarker> markers;
 
-  if ((http_ret = get_input(s, markers)) < 0) {
+  if ((http_ret = rgw_rest_get_json_input(store->ctx(), s, markers, REPLICA_INPUT_MAX_LEN, NULL)) < 0) {
+    dout(5) << "Error - retrieving input data - " << http_ret << dendl;
     return;
   }
 
-  http_ret = rl.update_bound(bucket, daemon_id, marker, ut, &markers);
+  http_ret = rl.update_bound(bucket, shard_id, daemon_id, marker, ut, &markers);
 }
 
 void RGWOp_BILog_GetBounds::execute() {
   string bucket_instance = s->info.args.get("bucket-instance");
+  rgw_bucket bucket;
 
-  if (bucket_instance.empty()) {
-    dout(5) << " Error - invalid parameter list" << dendl;
-    http_ret = -EINVAL;
+  int shard_id;
+
+  http_ret = rgw_bucket_parse_bucket_instance(bucket_instance, &bucket_instance, &shard_id);
+  if (http_ret < 0) {
+    dout(5) << "failed to parse bucket instance" << dendl;
     return;
   }
 
-  rgw_bucket bucket;
   if ((http_ret = bucket_instance_to_bucket(store, bucket_instance, bucket)) < 0) 
     return;
 
   RGWReplicaBucketLogger rl(store);
-  http_ret = rl.get_bounds(bucket, bounds);
+  http_ret = rl.get_bounds(bucket, shard_id, bounds);
 }
 
 void RGWOp_BILog_GetBounds::send_response() {
@@ -248,22 +242,33 @@ void RGWOp_BILog_GetBounds::send_response() {
 }
 
 void RGWOp_BILog_DeleteBounds::execute() {
-  string bucket_instance = s->info.args.get("bucket-instance"),
-         daemon_id = s->info.args.get("daemon_id");
+  string bucket_instance = s->info.args.get("bucket-instance");
+  string daemon_id = s->info.args.get("daemon_id");
+  bool purge_all;
 
-  if (bucket_instance.empty() ||
-      daemon_id.empty()) {
+  s->info.args.get_bool("purge-all", &purge_all, false);
+
+  if (daemon_id.empty() && !purge_all) {
     dout(5) << "Error - invalid parameter list" << dendl;
     http_ret = -EINVAL;
     return;
   }
   
-  rgw_bucket bucket;
-  if ((http_ret = bucket_instance_to_bucket(store, bucket_instance, bucket)) < 0) 
+  int shard_id;
+  http_ret = rgw_bucket_parse_bucket_instance(bucket_instance, &bucket_instance, &shard_id);
+  if (http_ret < 0) {
+    dout(5) << "failed to parse bucket instance" << dendl;
     return;
-  
+  }
+
+  rgw_bucket bucket;
+
+  if ((http_ret = bucket_instance_to_bucket(store, bucket_instance, bucket)) < 0) {
+    return;
+  }
+
   RGWReplicaBucketLogger rl(store);
-  http_ret = rl.delete_bound(bucket, daemon_id);
+  http_ret = rl.delete_bound(bucket, shard_id, daemon_id, purge_all);
 }
 
 RGWOp *RGWHandler_ReplicaLog::op_get() {

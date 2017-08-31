@@ -1,4 +1,5 @@
-#!/bin/bash -x
+#!/usr/bin/env bash
+set -x
 
 #
 # Creates some unfound objects and then tests finding them.
@@ -7,9 +8,11 @@
 # Includes
 source "`dirname $0`/test_common.sh"
 
+TEST_POOL=rbd
+
 # Functions
 my_write_objects() {
-        write_objects $1 $2 10 1000000 data
+        write_objects $1 $2 10 1000000 $TEST_POOL
 }
 
 setup() {
@@ -49,7 +52,7 @@ osd_resurrection_1_impl() {
         echo "Got unfound objects."
 
         (
-                ./rados -c ./ceph.conf -p data get obj01 $TEMPDIR/obj01 || die "radostool failed"
+                ./rados -c ./ceph.conf -p $TEST_POOL get obj01 $TEMPDIR/obj01 || die "radostool failed"
         ) &
         sleep 5
         [ -e $TEMPDIR/obj01 ] && die "unexpected error: fetched unfound object?"

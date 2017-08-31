@@ -12,35 +12,19 @@
  * 
  */
 
-#include "include/int_types.h"
-
-#include "common/Thread.h"
 #include "common/admin_socket.h"
-#include "common/config.h"
-#include "common/cmdparse.h"
-#include "common/dout.h"
+#include "common/admin_socket_client.h"
 #include "common/errno.h"
-#include "common/perf_counters.h"
 #include "common/pipe.h"
 #include "common/safe_io.h"
 #include "common/version.h"
-#include "common/Formatter.h"
-
-#include <errno.h>
-#include <fcntl.h>
-#include <map>
-#include <poll.h>
-#include <set>
-#include <sstream>
-#include <stdint.h>
-#include <string.h>
-#include <string>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <sys/un.h>
-#include <unistd.h>
-
 #include "include/compat.h"
+
+#include <poll.h>
+#include <sys/un.h>
+
+// re-include our assert to clobber the system one; fix dout:
+#include "include/assert.h"
 
 #define dout_subsys ceph_subsys_asok
 #undef dout_prefix
@@ -64,7 +48,7 @@ static bool cleanup_atexit = false;
 static void remove_cleanup_file(const char *file)
 {
   pthread_mutex_lock(&cleanup_lock);
-  TEMP_FAILURE_RETRY(unlink(file));
+  VOID_TEMP_FAILURE_RETRY(unlink(file));
   for (std::vector <const char*>::iterator i = cleanup_files.begin();
        i != cleanup_files.end(); ++i) {
     if (strcmp(file, *i) == 0) {
@@ -81,7 +65,7 @@ static void remove_all_cleanup_files()
   pthread_mutex_lock(&cleanup_lock);
   for (std::vector <const char*>::iterator i = cleanup_files.begin();
        i != cleanup_files.end(); ++i) {
-    TEMP_FAILURE_RETRY(unlink(*i));
+    VOID_TEMP_FAILURE_RETRY(unlink(*i));
     free((void*)*i);
   }
   cleanup_files.clear();
@@ -108,9 +92,11 @@ AdminSocket::AdminSocket(CephContext *cct)
     m_sock_fd(-1),
     m_shutdown_rd_fd(-1),
     m_shutdown_wr_fd(-1),
+    in_hook(false),
     m_lock("AdminSocket::m_lock"),
     m_version_hook(NULL),
-    m_help_hook(NULL)
+    m_help_hook(NULL),
+    m_getdescs_hook(NULL)
 {
 }
 
@@ -147,6 +133,33 @@ std::string AdminSocket::create_shutdown_pipe(int *pipe_rd, int *pipe_wr)
   return "";
 }
 
+std::string AdminSocket::destroy_shutdown_pipe()
+{
+  // Send a byte to the shutdown pipe that the thread is listening to
+  char buf[1] = { 0x0 };
+  int ret = safe_write(m_shutdown_wr_fd, buf, sizeof(buf));
+
+  // Close write end
+  VOID_TEMP_FAILURE_RETRY(close(m_shutdown_wr_fd));
+  m_shutdown_wr_fd = -1;
+
+  if (ret != 0) {
+    ostringstream oss;
+    oss << "AdminSocket::destroy_shutdown_pipe error: failed to write"
+      "to thread shutdown pipe: error " << ret;
+    return oss.str();
+  }
+
+  join();
+
+  // Close read end. Doing this before join() blocks the listenter and prevents
+  // joining.
+  VOID_TEMP_FAILURE_RETRY(close(m_shutdown_rd_fd));
+  m_shutdown_rd_fd = -1;
+
+  return "";
+}
+
 std::string AdminSocket::bind_and_listen(const std::string &sock_path, int *fd)
 {
   ldout(m_cct, 5) << "bind_and_listen " << sock_path << dendl;
@@ -171,7 +184,7 @@ std::string AdminSocket::bind_and_listen(const std::string &sock_path, int *fd)
   int r = fcntl(sock_fd, F_SETFD, FD_CLOEXEC);
   if (r < 0) {
     r = errno;
-    TEMP_FAILURE_RETRY(::close(sock_fd));
+    VOID_TEMP_FAILURE_RETRY(::close(sock_fd));
     ostringstream oss;
     oss << "AdminSocket::bind_and_listen: failed to fcntl on socket: " << cpp_strerror(r);
     return oss.str();
@@ -180,19 +193,25 @@ std::string AdminSocket::bind_and_listen(const std::string &sock_path, int *fd)
   address.sun_family = AF_UNIX;
   snprintf(address.sun_path, sizeof(address.sun_path),
 	   "%s", sock_path.c_str());
-  if (bind(sock_fd, (struct sockaddr*)&address,
+  if (::bind(sock_fd, (struct sockaddr*)&address,
 	   sizeof(struct sockaddr_un)) != 0) {
     int err = errno;
     if (err == EADDRINUSE) {
-      // The old UNIX domain socket must still be there.
-      // Let's unlink it and try again.
-      TEMP_FAILURE_RETRY(unlink(sock_path.c_str()));
-      if (bind(sock_fd, (struct sockaddr*)&address,
-	       sizeof(struct sockaddr_un)) == 0) {
-	err = 0;
-      }
-      else {
-	err = errno;
+      AdminSocketClient client(sock_path);
+      bool ok;
+      client.ping(&ok);
+      if (ok) {
+	ldout(m_cct, 20) << "socket " << sock_path << " is in use" << dendl;
+	err = EEXIST;
+      } else {
+	ldout(m_cct, 20) << "unlink stale file " << sock_path << dendl;
+	VOID_TEMP_FAILURE_RETRY(unlink(sock_path.c_str()));
+	if (::bind(sock_fd, (struct sockaddr*)&address,
+		 sizeof(struct sockaddr_un)) == 0) {
+	  err = 0;
+	} else {
+	  err = errno;
+	}
       }
     }
     if (err != 0) {
@@ -210,7 +229,7 @@ std::string AdminSocket::bind_and_listen(const std::string &sock_path, int *fd)
     oss << "AdminSocket::bind_and_listen: "
 	  << "failed to listen to socket: " << cpp_strerror(err);
     close(sock_fd);
-    TEMP_FAILURE_RETRY(unlink(sock_path.c_str()));
+    VOID_TEMP_FAILURE_RETRY(unlink(sock_path.c_str()));
     return oss.str();
   }
   *fd = sock_fd;
@@ -251,6 +270,29 @@ void* AdminSocket::entry()
   ldout(m_cct, 5) << "entry exit" << dendl;
 }
 
+void AdminSocket::chown(uid_t uid, gid_t gid)
+{
+  if (m_sock_fd >= 0) {
+    int r = ::chown(m_path.c_str(), uid, gid);
+    if (r < 0) {
+      r = -errno;
+      lderr(m_cct) << "AdminSocket: failed to chown socket: "
+		   << cpp_strerror(r) << dendl;
+    }
+  }
+}
+
+void AdminSocket::chmod(mode_t mode)
+{
+  if (m_sock_fd >= 0) {
+    int r = ::chmod(m_path.c_str(), mode);
+    if (r < 0) {
+      r = -errno;
+      lderr(m_cct) << "AdminSocket: failed to chmod socket: "
+                   << cpp_strerror(r) << dendl;
+    }
+  }
+}
 
 bool AdminSocket::do_accept()
 {
@@ -268,14 +310,16 @@ bool AdminSocket::do_accept()
   }
 
   char cmd[1024];
-  int pos = 0;
+  unsigned pos = 0;
   string c;
   while (1) {
     int ret = safe_read(connection_fd, &cmd[pos], 1);
     if (ret <= 0) {
-      lderr(m_cct) << "AdminSocket: error reading request code: "
-		   << cpp_strerror(ret) << dendl;
-      close(connection_fd);
+      if (ret < 0) {
+        lderr(m_cct) << "AdminSocket: error reading request code: "
+		     << cpp_strerror(ret) << dendl;
+      }
+      VOID_TEMP_FAILURE_RETRY(close(connection_fd));
       return false;
     }
     //ldout(m_cct, 0) << "AdminSocket read byte " << (int)cmd[pos] << " pos " << pos << dendl;
@@ -306,7 +350,11 @@ bool AdminSocket::do_accept()
 	break;
       }
     }
-    pos++;
+    if (++pos >= sizeof(cmd)) {
+      lderr(m_cct) << "AdminSocket: error reading request too long" << dendl;
+      VOID_TEMP_FAILURE_RETRY(close(connection_fd));
+      return false;
+    }
   }
 
   bool rval = false;
@@ -317,17 +365,15 @@ bool AdminSocket::do_accept()
   stringstream errss;
   cmdvec.push_back(cmd);
   if (!cmdmap_from_json(cmdvec, &cmdmap, errss)) {
-    ldout(m_cct, 0) << "AdminSocket: " << errss << dendl;
+    ldout(m_cct, 0) << "AdminSocket: " << errss.rdbuf() << dendl;
+    VOID_TEMP_FAILURE_RETRY(close(connection_fd));
     return false;
   }
   cmd_getval(m_cct, cmdmap, "format", format);
+  if (format != "json" && format != "json-pretty" &&
+      format != "xml" && format != "xml-pretty")
+    format = "json-pretty";
   cmd_getval(m_cct, cmdmap, "prefix", c);
-
-  string firstword;
-  if (c.find(" ") == string::npos)
-    firstword = c;
-  else
-    firstword = c.substr(0, c.find(" "));
 
   m_lock.Lock();
   map<string,AdminSocketHook*>::iterator p;
@@ -352,9 +398,22 @@ bool AdminSocket::do_accept()
     lderr(m_cct) << "AdminSocket: request '" << c << "' not defined" << dendl;
   } else {
     string args;
-    if (match != c)
+    if (match != c) {
       args = c.substr(match.length() + 1);
-    bool success = p->second->call(match, cmdmap, format, out);
+    }
+
+    // Drop lock to avoid cycles in cases where the hook takes
+    // the same lock that was held during calls to register/unregister,
+    // and set in_hook to allow unregister to wait for us before
+    // removing this hook.
+    in_hook = true;
+    auto match_hook = p->second;
+    m_lock.Unlock();
+    bool success = match_hook->call(match, cmdmap, format, out);
+    m_lock.Lock();
+    in_hook = false;
+    in_hook_cond.Signal();
+
     if (!success) {
       ldout(m_cct, 0) << "AdminSocket: request '" << match << "' args '" << args
 		      << "' to " << p->second << " failed" << dendl;
@@ -376,7 +435,7 @@ bool AdminSocket::do_accept()
   }
   m_lock.Unlock();
 
-  TEMP_FAILURE_RETRY(close(connection_fd));
+  VOID_TEMP_FAILURE_RETRY(close(connection_fd));
   return rval;
 }
 
@@ -407,6 +466,14 @@ int AdminSocket::unregister_command(std::string command)
     m_hooks.erase(command);
     m_descs.erase(command);
     m_help.erase(command);
+
+    // If we are currently processing a command, wait for it to
+    // complete in case it referenced the hook that we are
+    // unregistering.
+    if (in_hook) {
+      in_hook_cond.Wait(m_lock);
+    }
+
     ret = 0;
   } else {
     ldout(m_cct, 5) << "unregister_command " << command << " ENOENT" << dendl;
@@ -418,19 +485,23 @@ int AdminSocket::unregister_command(std::string command)
 
 class VersionHook : public AdminSocketHook {
 public:
-  virtual bool call(std::string command, cmdmap_t &cmdmap, std::string format,
-		    bufferlist& out) {
+  bool call(std::string command, cmdmap_t &cmdmap, std::string format,
+		    bufferlist& out) override {
     if (command == "0") {
       out.append(CEPH_ADMIN_SOCK_VERSION);
     } else {
       JSONFormatter jf;
       jf.open_object_section("version");
-      if (command == "version")
+      if (command == "version") {
 	jf.dump_string("version", ceph_version_to_str());
-      else if (command == "git_version")
+	jf.dump_string("release", ceph_release_name(ceph_release()));
+	jf.dump_string("release_type", ceph_release_type());
+      } else if (command == "git_version") {
 	jf.dump_string("git_version", git_version_to_str());
+      }
       ostringstream ss;
       jf.close_section();
+      jf.enable_line_break();
       jf.flush(ss);
       out.append(ss.str());
     }
@@ -441,9 +512,9 @@ public:
 class HelpHook : public AdminSocketHook {
   AdminSocket *m_as;
 public:
-  HelpHook(AdminSocket *as) : m_as(as) {}
-  bool call(string command, cmdmap_t &cmdmap, string format, bufferlist& out) {
-    Formatter *f = new_formatter(format);
+  explicit HelpHook(AdminSocket *as) : m_as(as) {}
+  bool call(string command, cmdmap_t &cmdmap, string format, bufferlist& out) override {
+    Formatter *f = Formatter::create(format, "json-pretty", "json-pretty");
     f->open_object_section("help");
     for (map<string,string>::iterator p = m_as->m_help.begin();
 	 p != m_as->m_help.end();
@@ -463,10 +534,10 @@ public:
 class GetdescsHook : public AdminSocketHook {
   AdminSocket *m_as;
 public:
-  GetdescsHook(AdminSocket *as) : m_as(as) {}
-  bool call(string command, cmdmap_t &cmdmap, string format, bufferlist& out) {
+  explicit GetdescsHook(AdminSocket *as) : m_as(as) {}
+  bool call(string command, cmdmap_t &cmdmap, string format, bufferlist& out) override {
     int cmdnum = 0;
-    JSONFormatter jf(false);
+    JSONFormatter jf;
     jf.open_object_section("command_descriptions");
     for (map<string,string>::iterator p = m_as->m_descs.begin();
 	 p != m_as->m_descs.end();
@@ -480,6 +551,7 @@ public:
       cmdnum++;
     }
     jf.close_section(); // command_descriptions
+    jf.enable_line_break();
     ostringstream ss;
     jf.flush(ss);
     out.append(ss.str());
@@ -524,37 +596,38 @@ bool AdminSocket::init(const std::string &path)
   register_command("get_command_descriptions", "get_command_descriptions",
 		   m_getdescs_hook, "list available commands");
 
-  create();
+  create("admin_socket");
   add_cleanup_file(m_path.c_str());
   return true;
 }
 
 void AdminSocket::shutdown()
 {
+  std::string err;
+
+  // Under normal operation this is unlikely to occur.  However for some unit
+  // tests, some object members are not initialized and so cannot be deleted
+  // without fault.
   if (m_shutdown_wr_fd < 0)
     return;
 
   ldout(m_cct, 5) << "shutdown" << dendl;
 
-  // Send a byte to the shutdown pipe that the thread is listening to
-  char buf[1] = { 0x0 };
-  int ret = safe_write(m_shutdown_wr_fd, buf, sizeof(buf));
-  TEMP_FAILURE_RETRY(close(m_shutdown_wr_fd));
-  m_shutdown_wr_fd = -1;
-
-  if (ret == 0) {
-    join();
-  } else {
-    lderr(m_cct) << "AdminSocket::shutdown: failed to write "
-      "to thread shutdown pipe: error " << ret << dendl;
+  err = destroy_shutdown_pipe();
+  if (!err.empty()) {
+    lderr(m_cct) << "AdminSocket::shutdown: error: " << err << dendl;
   }
+
+  VOID_TEMP_FAILURE_RETRY(close(m_sock_fd));
 
   unregister_command("version");
   unregister_command("git_version");
   unregister_command("0");
   delete m_version_hook;
+
   unregister_command("help");
   delete m_help_hook;
+
   unregister_command("get_command_descriptions");
   delete m_getdescs_hook;
 

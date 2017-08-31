@@ -1,16 +1,21 @@
 #ifndef CEPH_CLIENT_FH_H
 #define CEPH_CLIENT_FH_H
 
+#include "common/Readahead.h"
 #include "include/types.h"
+#include "InodeRef.h"
+#include "UserPerm.h"
 
-class Inode;
 class Cond;
+class ceph_lock_state_t;
+class Inode;
 
 // file handle for any open file state
 
 struct Fh {
-  Inode    *inode;
-  loff_t     pos;
+  InodeRef  inode;
+  int	    _ref;
+  loff_t    pos;
   int       mds;        // have to talk to mds we opened with (for now)
   int       mode;       // the mode i opened the file with
 
@@ -18,13 +23,31 @@ struct Fh {
   bool pos_locked;           // pos is currently in use
   list<Cond*> pos_waiters;   // waiters for pos
 
-  // readahead state
-  loff_t last_pos;
-  loff_t consec_read_bytes;
-  int nr_consec_read;
+  UserPerm actor_perms; // perms I opened the file with
 
-  Fh() : inode(0), pos(0), mds(0), mode(0), flags(0), pos_locked(false),
-	 last_pos(0), consec_read_bytes(0), nr_consec_read(0) {}
+  Readahead readahead;
+
+  // file lock
+  ceph_lock_state_t *fcntl_locks;
+  ceph_lock_state_t *flock_locks;
+
+  // IO error encountered by any writeback on this Inode while
+  // this Fh existed (i.e. an fsync on another Fh will still show
+  // up as an async_err here because it could have been the same
+  // bytes we wrote via this Fh).
+  int async_err = {0};
+
+  int take_async_err()
+  {
+      int e = async_err;
+      async_err = 0;
+      return e;
+  }
+  
+  Fh(Inode *in);
+  ~Fh();
+  void get() { ++_ref; }
+  int put() { return --_ref; }
 };
 
 

@@ -16,7 +16,8 @@
 #ifndef CEPH_CAPABILITY_H
 #define CEPH_CAPABILITY_H
 
-#include "include/buffer.h"
+#include "include/counter.h"
+#include "include/buffer_fwd.h"
 #include "include/xlist.h"
 
 #include "common/config.h"
@@ -63,76 +64,74 @@ namespace ceph {
   class Formatter;
 }
 
-class Capability {
-private:
-  static boost::pool<> pool;
-public:
-  static void *operator new(size_t num_bytes) { 
-    void *n = pool.malloc();
-    if (!n)
-      throw std::bad_alloc();
-    return n;
-  }
-  void operator delete(void *p) {
-    pool.free(p);
-  }
+class Capability : public Counter<Capability> {
 public:
   struct Export {
+    int64_t cap_id;
     int32_t wanted;
     int32_t issued;
     int32_t pending;
     snapid_t client_follows;
+    ceph_seq_t seq;
     ceph_seq_t mseq;
     utime_t last_issue_stamp;
-    Export() {}
-    Export(int w, int i, int p, snapid_t cf, ceph_seq_t s, utime_t lis) : 
-      wanted(w), issued(i), pending(p), client_follows(cf), mseq(s), last_issue_stamp(lis) {}
+    Export() : cap_id(0), wanted(0), issued(0), pending(0), seq(0), mseq(0) {}
+    Export(int64_t id, int w, int i, int p, snapid_t cf, ceph_seq_t s, ceph_seq_t m, utime_t lis) :
+      cap_id(id), wanted(w), issued(i), pending(p), client_follows(cf),
+      seq(s), mseq(m), last_issue_stamp(lis) {}
     void encode(bufferlist &bl) const;
     void decode(bufferlist::iterator &p);
     void dump(Formatter *f) const;
     static void generate_test_instances(list<Export*>& ls);
   };
-
-private:
-  CInode *inode;
-  client_t client;
-
-  uint64_t cap_id;
-
-  __u32 _wanted;     // what the client wants (ideally)
-
-  utime_t last_issue_stamp;
-
-
-  // track in-flight caps --------------
-  //  - add new caps to _pending
-  //  - track revocations in _revokes list
-public:
+  struct Import {
+    int64_t cap_id;
+    ceph_seq_t issue_seq;
+    ceph_seq_t mseq;
+    Import() : cap_id(0), issue_seq(0), mseq(0) {}
+    Import(int64_t i, ceph_seq_t s, ceph_seq_t m) : cap_id(i), issue_seq(s), mseq(m) {}
+    void encode(bufferlist &bl) const;
+    void decode(bufferlist::iterator &p);
+    void dump(Formatter *f) const;
+  };
   struct revoke_info {
     __u32 before;
     ceph_seq_t seq, last_issue;
-    revoke_info() {}
+    revoke_info() : before(0), seq(0), last_issue(0) {}
     revoke_info(__u32 b, ceph_seq_t s, ceph_seq_t li) : before(b), seq(s), last_issue(li) {}
     void encode(bufferlist& bl) const;
     void decode(bufferlist::iterator& bl);
     void dump(Formatter *f) const;
     static void generate_test_instances(list<revoke_info*>& ls);
   };
-private:
-  __u32 _pending, _issued;
-  list<revoke_info> _revokes;
 
-public:
-  int pending() { return _pending; }
-  int issued() {
-    if (0) {
-      //#warning capability debug sanity check, remove me someday
-      unsigned o = _issued;
-      _calc_issued();
-      assert(o == _issued);
-    }
-    return _issued;
+
+  const static unsigned STATE_STALE		= (1<<0);
+  const static unsigned STATE_NEW		= (1<<1);
+  const static unsigned STATE_IMPORTING		= (1<<2);
+
+
+  Capability(CInode *i = NULL, uint64_t id = 0, client_t c = 0) :
+    client_follows(0), client_xattr_version(0),
+    client_inline_version(0),
+    last_rbytes(0), last_rsize(0),
+    item_session_caps(this), item_snaprealm_caps(this),
+    item_revoking_caps(this), item_client_revoking_caps(this),
+    inode(i), client(c),
+    cap_id(id),
+    _wanted(0), num_revoke_warnings(0),
+    _pending(0), _issued(0),
+    last_sent(0),
+    last_issue(0),
+    mseq(0),
+    suppress(0), state(0) {
   }
+  Capability(const Capability& other);  // no copying
+
+  const Capability& operator=(const Capability& other);  // no copying
+
+  int pending() { return _pending; }
+  int issued() { return _issued; }
   bool is_null() { return !_pending && _revokes.empty(); }
 
   ceph_seq_t issue(unsigned c) {
@@ -179,9 +178,19 @@ public:
       // can i forget any revocations?
       while (!_revokes.empty() && _revokes.front().seq < seq)
 	_revokes.pop_front();
-      if (!_revokes.empty() && _revokes.front().seq == seq)
-	_revokes.begin()->before = caps;
-      _calc_issued();
+      if (!_revokes.empty()) {
+	if (_revokes.front().seq == seq)
+	  _revokes.begin()->before = caps;
+	_calc_issued();
+      } else {
+	// seq < last_sent
+	_issued = caps | _pending;
+      }
+    }
+
+    if (_issued == _pending) {
+      item_revoking_caps.remove_myself();
+      item_client_revoking_caps.remove_myself();
     }
     //check_rdcaps_list();
   }
@@ -193,52 +202,27 @@ public:
       _revokes.pop_front();
       changed = true;
     }
-    if (changed)
+    if (changed) {
       _calc_issued();
+      if (_issued == _pending) {
+	item_revoking_caps.remove_myself();
+	item_client_revoking_caps.remove_myself();
+      }
+    }
   }
-
-
-private:
-  ceph_seq_t last_sent;
-  ceph_seq_t last_issue;
-  ceph_seq_t mseq;
-
-  int suppress;
-  bool stale;
-
-public:
-  snapid_t client_follows;
-  version_t client_xattr_version;
-  
-  xlist<Capability*>::item item_session_caps;
-  xlist<Capability*>::item item_snaprealm_caps;
-
-  Capability(CInode *i = NULL, uint64_t id = 0, client_t c = 0) : 
-    inode(i), client(c),
-    cap_id(id),
-    _wanted(0),
-    _pending(0), _issued(0),
-    last_sent(0),
-    last_issue(0),
-    mseq(0),
-    suppress(0), stale(false),
-    client_follows(0), client_xattr_version(0),
-    item_session_caps(this), item_snaprealm_caps(this) {
-    g_num_cap++;
-    g_num_capa++;
-  }
-  ~Capability() {
-    g_num_cap--;
-    g_num_caps++;
-  }
-  
   ceph_seq_t get_mseq() { return mseq; }
+  void inc_mseq() { mseq++; }
 
   ceph_seq_t get_last_sent() { return last_sent; }
   utime_t get_last_issue_stamp() { return last_issue_stamp; }
+  utime_t get_last_revoke_stamp() { return last_revoke_stamp; }
 
   void set_last_issue() { last_issue = last_sent; }
   void set_last_issue_stamp(utime_t t) { last_issue_stamp = t; }
+  void set_last_revoke_stamp(utime_t t) { last_revoke_stamp = t; }
+  void reset_num_revoke_warnings() { num_revoke_warnings = 0; }
+  void inc_num_revoke_warnings() { ++num_revoke_warnings; }
+  unsigned get_num_revoke_warnings() { return num_revoke_warnings; }
 
   void set_cap_id(uint64_t i) { cap_id = i; }
   uint64_t get_cap_id() { return cap_id; }
@@ -249,11 +233,18 @@ public:
   void inc_suppress() { suppress++; }
   void dec_suppress() { suppress--; }
 
-  bool is_stale() { return stale; }
-  void set_stale(bool b) { stale = b; }
+  bool is_stale() { return state & STATE_STALE; }
+  void mark_stale() { state |= STATE_STALE; }
+  void clear_stale() { state &= ~STATE_STALE; }
+  bool is_new() { return state & STATE_NEW; }
+  void mark_new() { state |= STATE_NEW; }
+  void clear_new() { state &= ~STATE_NEW; }
+  bool is_importing() { return state & STATE_IMPORTING; }
+  void mark_importing() { state |= STATE_IMPORTING; }
+  void clear_importing() { state &= ~STATE_IMPORTING; }
 
   CInode *get_inode() { return inode; }
-  client_t get_client() { return client; }
+  client_t get_client() const { return client; }
 
   // caps this client wants to hold
   int wanted() { return _wanted; }
@@ -262,6 +253,7 @@ public:
     //check_rdcaps_list();
   }
 
+  void inc_last_seq() { last_sent++; }
   ceph_seq_t get_last_seq() { return last_sent; }
   ceph_seq_t get_last_issue() { return last_issue; }
 
@@ -272,17 +264,20 @@ public:
   
   // -- exports --
   Export make_export() {
-    return Export(_wanted, issued(), pending(), client_follows, mseq+1, last_issue_stamp);
+    return Export(cap_id, _wanted, issued(), pending(), client_follows, last_sent, mseq+1, last_issue_stamp);
   }
-  void rejoin_import() { mseq++; }
   void merge(Export& other, bool auth_cap) {
-    // issued + pending
-    int newpending = other.pending | pending();
-    if (other.issued & ~newpending)
-      issue(other.issued | newpending);
-    else
-      issue(newpending);
-    last_issue_stamp = other.last_issue_stamp;
+    if (!is_stale()) {
+      // issued + pending
+      int newpending = other.pending | pending();
+      if (other.issued & ~newpending)
+	issue(other.issued | newpending);
+      else
+	issue(newpending);
+      last_issue_stamp = other.last_issue_stamp;
+    } else {
+      issue(CEPH_CAP_PIN);
+    }
 
     client_follows = other.client_follows;
 
@@ -292,21 +287,25 @@ public:
       mseq = other.mseq;
   }
   void merge(int otherwanted, int otherissued) {
-    // issued + pending
-    int newpending = pending();
-    if (otherissued & ~newpending)
-      issue(otherissued | newpending);
-    else
-      issue(newpending);
+    if (!is_stale()) {
+      // issued + pending
+      int newpending = pending();
+      if (otherissued & ~newpending)
+	issue(otherissued | newpending);
+      else
+	issue(newpending);
+    } else {
+      issue(CEPH_CAP_PIN);
+    }
 
     // wanted
     _wanted = _wanted | otherwanted;
   }
 
   void revoke() {
-    if (pending())
-      issue(0);
-    confirm_receipt(last_sent, 0);
+    if (pending() & ~CEPH_CAP_PIN)
+      issue(CEPH_CAP_PIN);
+    confirm_receipt(last_sent, CEPH_CAP_PIN);
   }
 
   // serializers
@@ -315,9 +314,45 @@ public:
   void dump(Formatter *f) const;
   static void generate_test_instances(list<Capability*>& ls);
   
+  snapid_t client_follows;
+  version_t client_xattr_version;
+  version_t client_inline_version;
+  int64_t last_rbytes;
+  int64_t last_rsize;
+
+  xlist<Capability*>::item item_session_caps;
+  xlist<Capability*>::item item_snaprealm_caps;
+  xlist<Capability*>::item item_revoking_caps;
+  xlist<Capability*>::item item_client_revoking_caps;
+
+private:
+  CInode *inode;
+  client_t client;
+
+  uint64_t cap_id;
+
+  __u32 _wanted;     // what the client wants (ideally)
+
+  utime_t last_issue_stamp;
+  utime_t last_revoke_stamp;
+  unsigned num_revoke_warnings;
+
+  // track in-flight caps --------------
+  //  - add new caps to _pending
+  //  - track revocations in _revokes list
+  __u32 _pending, _issued;
+  list<revoke_info> _revokes;
+
+  ceph_seq_t last_sent;
+  ceph_seq_t last_issue;
+  ceph_seq_t mseq;
+
+  int suppress;
+  unsigned state;
 };
 
 WRITE_CLASS_ENCODER(Capability::Export)
+WRITE_CLASS_ENCODER(Capability::Import)
 WRITE_CLASS_ENCODER(Capability::revoke_info)
 WRITE_CLASS_ENCODER(Capability)
 

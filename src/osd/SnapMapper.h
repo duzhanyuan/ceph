@@ -30,30 +30,30 @@
 class OSDriver : public MapCacher::StoreDriver<std::string, bufferlist> {
   ObjectStore *os;
   coll_t cid;
-  hobject_t hoid;
+  ghobject_t hoid;
 
 public:
   class OSTransaction : public MapCacher::Transaction<std::string, bufferlist> {
     friend class OSDriver;
     coll_t cid;
-    hobject_t hoid;
+    ghobject_t hoid;
     ObjectStore::Transaction *t;
     OSTransaction(
       coll_t cid,
-      const hobject_t &hoid,
+      const ghobject_t &hoid,
       ObjectStore::Transaction *t)
       : cid(cid), hoid(hoid), t(t) {}
   public:
     void set_keys(
-      const std::map<std::string, bufferlist> &to_set) {
+      const std::map<std::string, bufferlist> &to_set) override {
       t->omap_setkeys(cid, hoid, to_set);
     }
     void remove_keys(
-      const std::set<std::string> &to_remove) {
+      const std::set<std::string> &to_remove) override {
       t->omap_rmkeys(cid, hoid, to_remove);
     }
     void add_callback(
-      Context *c) {
+      Context *c) override {
       t->register_on_applied(c);
     }
   };
@@ -63,14 +63,14 @@ public:
     return OSTransaction(cid, hoid, t);
   }
 
-  OSDriver(ObjectStore *os, coll_t cid, const hobject_t &hoid) :
+  OSDriver(ObjectStore *os, coll_t cid, const ghobject_t &hoid) :
     os(os), cid(cid), hoid(hoid) {}
   int get_keys(
     const std::set<std::string> &keys,
-    std::map<std::string, bufferlist> *out);
+    std::map<std::string, bufferlist> *out) override;
   int get_next(
     const std::string &key,
-    pair<std::string, bufferlist> *next);
+    pair<std::string, bufferlist> *next) override;
 };
 
 /**
@@ -97,6 +97,7 @@ public:
  */
 class SnapMapper {
 public:
+  CephContext* cct;
   struct object_snaps {
     hobject_t oid;
     std::set<snapid_t> snaps;
@@ -115,10 +116,10 @@ private:
 
   static std::string get_prefix(snapid_t snap);
 
-  static std::string to_raw_key(
+  std::string to_raw_key(
     const std::pair<snapid_t, hobject_t> &to_map);
 
-  static std::pair<std::string, bufferlist> to_raw(
+  std::pair<std::string, bufferlist> to_raw(
     const std::pair<snapid_t, hobject_t> &to_map);
 
   static bool is_mapping(const std::string &to_test);
@@ -150,17 +151,30 @@ private:
     );
 
 public:
+  static string make_shard_prefix(shard_id_t shard) {
+    if (shard == shard_id_t::NO_SHARD)
+      return string();
+    char buf[20];
+    int r = snprintf(buf, sizeof(buf), ".%x", (int)shard);
+    assert(r < (int)sizeof(buf));
+    return string(buf, r) + '_';
+  }
   uint32_t mask_bits;
   const uint32_t match;
   string last_key_checked;
   const int64_t pool;
+  const shard_id_t shard;
+  const string shard_prefix;
   SnapMapper(
+    CephContext* cct,
     MapCacher::StoreDriver<std::string, bufferlist> *driver,
     uint32_t match,  ///< [in] pgid
     uint32_t bits,   ///< [in] current split bits
-    int64_t pool     ///< [in] pool
+    int64_t pool,    ///< [in] pool
+    shard_id_t shard ///< [in] shard
     )
-    : backend(driver), mask_bits(bits), match(match), pool(pool) {
+    : cct(cct), backend(driver), mask_bits(bits), match(match), pool(pool),
+      shard(shard), shard_prefix(make_shard_prefix(shard)) {
     update_bits(mask_bits);
   }
 
@@ -171,10 +185,16 @@ public:
     ) {
     assert(new_bits >= mask_bits);
     mask_bits = new_bits;
-    prefixes = hobject_t::get_prefixes(
+    set<string> _prefixes = hobject_t::get_prefixes(
       mask_bits,
       match,
       pool);
+    prefixes.clear();
+    for (set<string>::iterator i = _prefixes.begin();
+	 i != _prefixes.end();
+	 ++i) {
+      prefixes.insert(shard_prefix + *i);
+    }
   }
 
   /// Update snaps for oid, empty new_snaps removes the mapping
@@ -188,14 +208,15 @@ public:
   /// Add mapping for oid, must not already be mapped
   void add_oid(
     const hobject_t &oid,       ///< [in] oid to add
-    std::set<snapid_t> new_snaps, ///< [in] snaps
+    const std::set<snapid_t>& new_snaps, ///< [in] snaps
     MapCacher::Transaction<std::string, bufferlist> *t ///< [out] transaction
     );
 
   /// Returns first object with snap as a snap
-  int get_next_object_to_trim(
+  int get_next_objects_to_trim(
     snapid_t snap,              ///< [in] snap to check
-    hobject_t *hoid             ///< [out] next hoid to trim
+    unsigned max,               ///< [in] max to get
+    vector<hobject_t> *out      ///< [out] next objects to trim (must be empty)
     );  ///< @return error, -ENOENT if no more objects
 
   /// Remove mapping for oid
